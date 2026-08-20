@@ -67,7 +67,7 @@ function safeFilename(value: string) {
   return safe.slice(0, 180) || "cipherdrop-file";
 }
 
-export default function CipherDropClient({ displayName, signOutPath }: { displayName: string; signOutPath: string }) {
+export default function CipherDropClient() {
   const [session, setSession] = useState<Session | null>(null);
   const [inviteInput, setInviteInput] = useState("");
   const [inviteLink, setInviteLink] = useState("");
@@ -233,7 +233,7 @@ export default function CipherDropClient({ displayName, signOutPath }: { display
     if (autoRoomRef.current || sessionRef.current || new URLSearchParams(window.location.search).has("room")) return;
     autoRoomRef.current = true;
     void createRoom();
-    // A signed-in visitor receives one temporary code automatically on arrival.
+    // Every visitor receives one temporary code automatically on arrival.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -489,10 +489,7 @@ export default function CipherDropClient({ displayName, signOutPath }: { display
           <span className="wordmark-icon" aria-hidden="true">C</span>
           CipherDrop
         </button>
-        <div className="account">
-          <span>{displayName}</span>
-          <a href={signOutPath}>Sign out</a>
-        </div>
+        <span className="privacy-status"><span className="dot online" /> No account required</span>
       </header>
 
       <div className="content">

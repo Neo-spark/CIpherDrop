@@ -61,10 +61,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   font-size: 12px;
   font-weight: 800;
 }
-.account { display: flex; align-items: center; gap: 14px; font-size: 12px; }
-.account span { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-.account a { color: var(--text); font-weight: 600; text-decoration: none; }
-.account a:hover { text-decoration: underline; }
+.privacy-status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 
 .content { width: min(100% - 40px, 760px); flex: 1; margin: 0 auto; padding: 64px 0 48px; }
 h1 { margin: 0; font-size: clamp(28px, 5vw, 38px); line-height: 1.15; letter-spacing: -.04em; font-weight: 680; }
@@ -166,7 +163,7 @@ footer { width: min(100% - 40px, 960px); margin: 0 auto; padding: 20px 0 28px; b
 @media (max-width: 640px) {
   .topbar, .content, footer { width: min(100% - 28px, 760px); }
   .topbar { height: 60px; }
-  .account span { display: none; }
+  .privacy-status { font-size: 11px; }
   .content { padding-top: 36px; }
   .start-card { margin-top: 36px; }
   .session-heading { align-items: flex-start; }

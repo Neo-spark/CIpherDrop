@@ -82,6 +82,13 @@ async function ensureSchema(db: D1Database) {
       payload TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS anonymous_rate_limits (
+      fingerprint TEXT NOT NULL,
+      action TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      request_count INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (fingerprint, action, window_start)
+    )`),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_signals_session_recipient_id ON signals(session_code, recipient, id)"),
   ]);
   for (const statement of [
@@ -103,21 +110,29 @@ function sameOrigin(request: Request) {
   return !origin || origin === new URL(request.url).origin;
 }
 
-async function authenticatedUserHash(request: Request) {
-  const userId = request.headers.get("oai-authenticated-user-id");
-  if (userId) return hash(`cipherdrop-user-v1|${userId}`);
-  const hostname = new URL(request.url).hostname;
-  return hostname === "localhost" || hostname === "127.0.0.1" ? hash("cipherdrop-user-v1|local-preview") : null;
+async function anonymousFingerprint(request: Request) {
+  const address = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "local";
+  return hash(`cipherdrop-anonymous-v1|${address}`);
 }
 
-async function authenticate(db: D1Database, code: string, role: string, token: string, userHash: string) {
+async function withinRateLimit(db: D1Database, fingerprint: string, action: string, limit: number, now: number) {
+  const windowStart = Math.floor(now / 60_000) * 60_000;
+  await db.prepare(`INSERT INTO anonymous_rate_limits (fingerprint, action, window_start, request_count)
+    VALUES (?, ?, ?, 1)
+    ON CONFLICT(fingerprint, action, window_start) DO UPDATE SET request_count = request_count + 1`)
+    .bind(fingerprint, action, windowStart).run();
+  const row = await db.prepare("SELECT request_count FROM anonymous_rate_limits WHERE fingerprint = ? AND action = ? AND window_start = ?")
+    .bind(fingerprint, action, windowStart).first<{ request_count: number }>();
+  return Boolean(row && row.request_count <= limit);
+}
+
+async function authenticate(db: D1Database, code: string, role: string, token: string) {
   if ((role !== "host" && role !== "guest") || !token || token.length > 100) return false;
   const row = await db.prepare("SELECT host_token_hash, host_user_hash, guest_token_hash, guest_user_hash, expires_at FROM sessions WHERE code = ?")
     .bind(code).first<{ host_token_hash: string; host_user_hash: string | null; guest_token_hash: string | null; guest_user_hash: string | null; expires_at: number }>();
   if (!row || row.expires_at <= Date.now()) return false;
   const expected = role === "host" ? row.host_token_hash : row.guest_token_hash;
-  const expectedUser = role === "host" ? row.host_user_hash : row.guest_user_hash;
-  return Boolean(expected && expectedUser === userHash && expected === await hash(token));
+  return Boolean(expected && expected === await hash(token));
 }
 
 async function api(request: Request, env: Env, ctx: ExecutionContext) {
@@ -125,20 +140,21 @@ async function api(request: Request, env: Env, ctx: ExecutionContext) {
   await ensureSchema(env.DB);
   const url = new URL(request.url);
   const now = Date.now();
-  const userHash = await authenticatedUserHash(request);
-  if (!userHash) return json({ error: "Sign in with ChatGPT to continue" }, 401);
+  const fingerprint = await anonymousFingerprint(request);
   ctx.waitUntil(env.DB.batch([
     env.DB.prepare("DELETE FROM signals WHERE created_at < ?").bind(now - SESSION_SECONDS * 1000),
     env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now),
+    env.DB.prepare("DELETE FROM anonymous_rate_limits WHERE window_start < ?").bind(now - 120_000),
   ]).then(() => undefined));
 
   if (url.pathname === "/api/sessions" && request.method === "POST") {
+    if (!await withinRateLimit(env.DB, fingerprint, "create", 20, now)) return json({ error: "Too many rooms created. Please wait a minute." }, 429);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const code = randomCode();
       const token = randomToken();
       try {
         await env.DB.prepare("INSERT INTO sessions (code, host_token_hash, host_user_hash, status, created_at, expires_at) VALUES (?, ?, ?, 'waiting', ?, ?)")
-          .bind(code, await hash(token), userHash, now, now + SESSION_SECONDS * 1000).run();
+          .bind(code, await hash(token), null, now, now + SESSION_SECONDS * 1000).run();
         return json({ code, token, expiresAt: now + SESSION_SECONDS * 1000 }, 201);
       } catch { /* retry an extremely unlikely code collision */ }
     }
@@ -151,9 +167,10 @@ async function api(request: Request, env: Env, ctx: ExecutionContext) {
   const action = match[2];
 
   if (action === "join" && request.method === "POST") {
+    if (!await withinRateLimit(env.DB, fingerprint, "join", 40, now)) return json({ error: "Too many connection attempts. Please wait a minute." }, 429);
     const token = randomToken();
-    const result = await env.DB.prepare("UPDATE sessions SET guest_token_hash = ?, guest_user_hash = ?, status = 'pending' WHERE code = ? AND guest_token_hash IS NULL AND host_user_hash != ? AND expires_at > ?")
-      .bind(await hash(token), userHash, code, userHash, now).run();
+    const result = await env.DB.prepare("UPDATE sessions SET guest_token_hash = ?, guest_user_hash = ?, status = 'pending' WHERE code = ? AND guest_token_hash IS NULL AND expires_at > ?")
+      .bind(await hash(token), null, code, now).run();
     if (!result.meta.changes) return json({ error: "Room is unavailable, expired, or already has a guest" }, 409);
     await env.DB.prepare("INSERT INTO signals (session_code, recipient, type, payload, created_at) VALUES (?, 'host', 'join-request', '{}', ?)")
       .bind(code, now).run();
@@ -163,7 +180,7 @@ async function api(request: Request, env: Env, ctx: ExecutionContext) {
   const role = url.searchParams.get("role") || "";
   const authHeader = request.headers.get("authorization") || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!await authenticate(env.DB, code, role, token, userHash)) return json({ error: "Session expired or unauthorized" }, 401);
+  if (!await authenticate(env.DB, code, role, token)) return json({ error: "Session expired or unauthorized" }, 401);
 
   if (action === "ice" && request.method === "GET") {
     const fallback = [{ urls: "stun:stun.cloudflare.com:3478" }];
