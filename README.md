@@ -2,7 +2,7 @@
 
 Secure, temporary, end-to-end encrypted file sharing directly between two browsers. Create a one-time room, share its code or private invitation link, approve the connection, and transfer a file without creating an account.
 
-**Live application:** [cipherdrop-secure-share.nitingaupale3.chatgpt.site](https://cipherdrop-secure-share.nitingaupale3.chatgpt.site/)
+**Live application:** [cipherdrop-nu.vercel.app](https://cipherdrop-nu.vercel.app/)
 
 ![CipherDrop social preview](./public/og.png)
 
