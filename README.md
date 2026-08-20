@@ -29,13 +29,13 @@ Most file-sharing services require an account, upload files to permanent storage
 6. Closing or ending the session destroys the active connection; expired signaling data is removed automatically.
 
 ```text
-Browser A ── temporary signaling ──> Vercel API + Upstash Redis
+Browser A ── temporary signaling ──> Render Node API + Upstash Redis
     │                                      │
     └──── encrypted WebRTC data channel ───┘ Browser B
              (file bytes travel here)
 ```
 
-The Vercel API coordinates room creation and WebRTC negotiation. It does not receive or store the transferred file contents.
+The Node.js API on Render coordinates room creation and WebRTC negotiation. It does not receive or store the transferred file contents.
 
 ## Security design
 
@@ -47,7 +47,7 @@ The Vercel API coordinates room creation and WebRTC negotiation. It does not rec
 - Replay detection for encrypted packets
 - SHA-256 file integrity verification before download completion
 - Random bearer tokens for host and guest signaling authorization
-- Same-origin API enforcement, strict security headers, and anonymous rate limiting
+- Strict frontend-origin allowlisting, security headers, and anonymous rate limiting
 - Optional TURN relay support for restrictive networks
 
 When joining with a manually entered code, both users should compare the displayed six-digit safety code before sending sensitive data. CipherDrop has not undergone an independent security audit, so review the implementation before using it for high-risk information.
@@ -55,7 +55,8 @@ When joining with a manually entered code, both users should compare the display
 ## Technology
 
 - React 19 and TypeScript
-- Next.js on Vercel
+- Next.js frontend on Vercel
+- Node.js and Express backend on Render
 - Upstash Redis for temporary signaling state
 - WebRTC data channels for peer-to-peer transfer
 - Web Crypto API for key exchange, encryption, and integrity checks
@@ -73,23 +74,37 @@ When joining with a manually entered code, both users should compare the display
 git clone https://github.com/Neo-spark/CIpherDrop.git
 cd CIpherDrop
 npm install
+cd backend
+npm install
+cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser. Add the Upstash values described below to `.env.local`, then open the application in two browser windows and connect them using the generated code or invitation link.
+In another terminal, start the frontend:
+
+```bash
+cd CIpherDrop
+cp .env.example .env.local
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) in your browser. Add the Upstash values described below to `backend/.env.local`, then open the application in two browser windows and connect them using the generated code or invitation link.
 
 ### Validation
 
 ```bash
 npm run lint
 npx tsc --noEmit
-node --test tests/cipher.test.mjs
+npm test
+npm run build
+cd backend
+npm run typecheck
 npm run build
 ```
 
 ## Configuration
 
-The application expects an Upstash Redis connection. When Upstash is installed through the Vercel Marketplace, these values are added automatically:
+The Node.js backend expects an Upstash Redis connection. Set these variables on Render:
 
 ```env
 KV_REST_API_URL=your_upstash_rest_url
@@ -101,6 +116,12 @@ Direct connections use Cloudflare's public STUN service by default. TURN relay s
 ```env
 TURN_KEY_ID=your_cloudflare_turn_key_id
 TURN_API_TOKEN=your_cloudflare_turn_api_token
+```
+
+Set the public backend URL on Vercel:
+
+```env
+NEXT_PUBLIC_API_URL=https://your-render-service.onrender.com
 ```
 
 Do not commit real credentials or local environment files.
@@ -116,7 +137,7 @@ Do not commit real credentials or local environment files.
 
 ## Privacy
 
-CipherDrop stores only short-lived room and signaling records in Upstash Redis to connect two browsers. File contents are encrypted and transferred through the WebRTC data channel rather than uploaded to Vercel or Redis. Rooms expire after one hour and can be ended immediately by either participant.
+CipherDrop stores only short-lived room and signaling records in Upstash Redis to connect two browsers. File contents are encrypted and transferred through the WebRTC data channel rather than uploaded to Vercel, Render, or Redis. Rooms expire after one hour and can be ended immediately by either participant.
 
 ## License
 

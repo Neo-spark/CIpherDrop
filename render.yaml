@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: cipherdrop-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.0
+      - key: FRONTEND_ORIGINS
+        value: https://cipherdrop-nu.vercel.app,http://localhost:3000
+      - key: KV_REST_API_URL
+        sync: false
+      - key: KV_REST_API_TOKEN
+        sync: false

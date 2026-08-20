@@ -29,12 +29,14 @@ type Transfer = { name: string; direction: "sending" | "receiving"; progress: nu
 const CHUNK_SIZE = 64 * 1024;
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
 const defaultIceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/u, "");
 
 async function api<T>(path: string, options: RequestInit = {}, session?: Session): Promise<T> {
+  if (!API_BASE_URL) throw new Error("The connection service is not configured");
   const headers = new Headers(options.headers);
   if (options.body) headers.set("content-type", "application/json");
   if (session) headers.set("authorization", `Bearer ${session.token}`);
-  const response = await fetch(path, { ...options, headers, cache: "no-store" });
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers, cache: "no-store" });
   const result = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(result.error || "The secure request failed");
   return result;
