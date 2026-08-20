@@ -29,13 +29,13 @@ Most file-sharing services require an account, upload files to permanent storage
 6. Closing or ending the session destroys the active connection; expired signaling data is removed automatically.
 
 ```text
-Browser A ── temporary signaling ──> Cloudflare Worker + D1
+Browser A ── temporary signaling ──> Vercel API + Upstash Redis
     │                                      │
     └──── encrypted WebRTC data channel ───┘ Browser B
              (file bytes travel here)
 ```
 
-The Worker coordinates room creation and WebRTC negotiation. It does not receive or store the transferred file contents.
+The Vercel API coordinates room creation and WebRTC negotiation. It does not receive or store the transferred file contents.
 
 ## Security design
 
@@ -55,9 +55,8 @@ When joining with a manually entered code, both users should compare the display
 ## Technology
 
 - React 19 and TypeScript
-- vinext and Vite
-- Cloudflare Workers
-- Cloudflare D1 for temporary signaling state
+- Next.js on Vercel
+- Upstash Redis for temporary signaling state
 - WebRTC data channels for peer-to-peer transfer
 - Web Crypto API for key exchange, encryption, and integrity checks
 
@@ -77,7 +76,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser. To test a transfer, open the application in two browser windows and connect them using the generated code or invitation link.
+Open [http://localhost:3000](http://localhost:3000) in your browser. Add the Upstash values described below to `.env.local`, then open the application in two browser windows and connect them using the generated code or invitation link.
 
 ### Validation
 
@@ -90,7 +89,14 @@ npm run build
 
 ## Configuration
 
-The application expects a Cloudflare D1 binding named `DB`. Direct connections use Cloudflare's public STUN service by default. TURN relay support is optional and can be enabled with:
+The application expects an Upstash Redis connection. When Upstash is installed through the Vercel Marketplace, these values are added automatically:
+
+```env
+KV_REST_API_URL=your_upstash_rest_url
+KV_REST_API_TOKEN=your_upstash_rest_token
+```
+
+Direct connections use Cloudflare's public STUN service by default. TURN relay support is optional and can be enabled with:
 
 ```env
 TURN_KEY_ID=your_cloudflare_turn_key_id
@@ -110,7 +116,7 @@ Do not commit real credentials or local environment files.
 
 ## Privacy
 
-CipherDrop stores only short-lived room and signaling records required to connect two browsers. File contents are encrypted and transferred through the WebRTC data channel rather than uploaded to application storage. Rooms expire after one hour and can be ended immediately by either participant.
+CipherDrop stores only short-lived room and signaling records in Upstash Redis to connect two browsers. File contents are encrypted and transferred through the WebRTC data channel rather than uploaded to Vercel or Redis. Rooms expire after one hour and can be ended immediately by either participant.
 
 ## License
 

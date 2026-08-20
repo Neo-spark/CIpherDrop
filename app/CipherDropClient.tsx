@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   authenticateHandshake,
   constantTimeEqual,
@@ -68,6 +69,7 @@ function safeFilename(value: string) {
 }
 
 export default function CipherDropClient() {
+  const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [inviteInput, setInviteInput] = useState("");
   const [inviteLink, setInviteLink] = useState("");
@@ -345,7 +347,7 @@ export default function CipherDropClient() {
   useEffect(() => { handleSignalRef.current = handleSignal; });
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || connected) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -362,7 +364,7 @@ export default function CipherDropClient() {
     };
     void poll();
     return () => { stopped = true; clearTimeout(timer); };
-  }, [session]);
+  }, [session, connected]);
 
   const waitForBuffer = async (channel: RTCDataChannel) => {
     if (channel.bufferedAmount < 2 * 1024 * 1024) return;
@@ -485,7 +487,7 @@ export default function CipherDropClient() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <button className="wordmark" onClick={() => { if (!session) window.location.assign("/"); }} aria-label="CipherDrop home">
+        <button className="wordmark" onClick={() => { if (!session) router.push("/"); }} aria-label="CipherDrop home">
           <span className="wordmark-icon" aria-hidden="true">C</span>
           CipherDrop
         </button>
