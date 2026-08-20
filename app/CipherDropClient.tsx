@@ -241,6 +241,13 @@ export default function CipherDropClient({ displayName, signOutPath }: { display
     setBusy(true); setError("");
     try {
       const parsed = await invitationFrom(inviteInput);
+      const existing = sessionRef.current;
+      if (existing) {
+        try { await api(`/api/sessions/${existing.code}/close?role=${existing.role}`, { method: "POST" }, existing); } catch { /* expired rooms need no cleanup */ }
+        channelRef.current?.close();
+        peerRef.current?.close();
+        sessionRef.current = null;
+      }
       const ephemeral = await createEphemeralKeyPair();
       const joined = await api<{ code: string; token: string; expiresAt: number }>(`/api/sessions/${parsed.code}/join`, { method: "POST" });
       const next: Session = { ...joined, role: "guest", secret: parsed.secret, ...ephemeral };
@@ -476,102 +483,124 @@ export default function CipherDropClient({ displayName, signOutPath }: { display
   };
 
   return (
-    <main className="shell">
-      <nav className="nav" aria-label="Main navigation">
-        <button className="brand brand-button" onClick={() => { if (!session) window.location.assign("/"); }} aria-label="CipherDrop home">
-          <span className="brand-mark" aria-hidden="true">C</span><span>CipherDrop</span>
+    <main className="app-shell">
+      <header className="topbar">
+        <button className="wordmark" onClick={() => { if (!session) window.location.assign("/"); }} aria-label="CipherDrop home">
+          <span className="wordmark-icon" aria-hidden="true">C</span>
+          CipherDrop
         </button>
-        <div className="nav-actions"><span className="privacy-pill"><span className="live-dot" /> End-to-end encrypted</span><span className="user-name">{displayName}</span><a className="sign-out" href={signOutPath}>Sign out</a></div>
-      </nav>
+        <div className="account">
+          <span>{displayName}</span>
+          <a href={signOutPath}>Sign out</a>
+        </div>
+      </header>
 
-      {!session ? (
-        <section className="hero">
-          <div className="eyebrow"><span>PRIVATE BY DESIGN</span><i /></div>
-          <h1>Send files.<br /><em>Leave no trace.</em></h1>
-          <p className="hero-copy">A temporary, direct connection between two devices. Files are encrypted before they leave your browser and the session disappears when you do.</p>
-          {error && <div className="error-banner" role="alert">{error}</div>}
-          <div className="action-grid">
-            <article className="action-card primary-card">
-              <div className="card-number">01</div>
-              <div><h2>Create a secure room</h2><p>Get a one-time private invitation for someone you trust.</p></div>
-              <button className="primary-button" type="button" onClick={createRoom} disabled={busy}>{busy ? "Creating…" : "Create private room"}<span aria-hidden="true">→</span></button>
-            </article>
-            <article className="action-card">
-              <div className="card-number">02</div>
-              <div><h2>Join with an invite</h2><p>Paste the full link. Its secret stays inside your browser.</p></div>
-              <div className="join-row">
-                <label className="sr-only" htmlFor="invite">Private invitation link</label>
-                <input id="invite" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Enter code or paste link" autoComplete="off" spellCheck={false} />
-                <button type="button" onClick={joinRoom} disabled={busy || !inviteInput} aria-label="Join secure room">→</button>
+      <div className="content">
+        {!session ? (
+          <section className="start-card">
+            <h1>{busy ? "Preparing your code…" : "Connect to someone"}</h1>
+            <p>Enter their code or paste an invitation link.</p>
+            {error && <div className="notice error" role="alert">{error}</div>}
+            <div className="input-action">
+              <label className="sr-only" htmlFor="invite">Connection code or invitation link</label>
+              <input id="invite" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Code or invitation link" autoComplete="off" spellCheck={false} />
+              <button className="button primary" type="button" onClick={joinRoom} disabled={busy || !inviteInput}>Connect</button>
+            </div>
+            {!busy && <button className="text-button" type="button" onClick={createRoom}>Create my code instead</button>}
+          </section>
+        ) : (
+          <section className="session">
+            <div className="session-heading">
+              <div>
+                <h1>{connected ? "Share a file" : session.role === "host" ? "Connect to someone" : "Connecting…"}</h1>
+                <div className="status"><span className={connected ? "dot online" : "dot"} />{phase}</div>
               </div>
-            </article>
-          </div>
-        </section>
-      ) : (
-        <section className="room-layout">
-          <header className="room-header">
-            <div><div className="eyebrow"><span>ONE-TIME ROOM</span><i /></div><h1 className="room-title">Private channel</h1></div>
-            <button className="end-button" onClick={endSession}>End & destroy session</button>
-          </header>
+              <button className="button subtle danger" onClick={endSession}>End session</button>
+            </div>
 
-          {error && <div className="error-banner" role="alert">{error}</div>}
-          <div className="status-strip"><span className={connected ? "status-orb connected" : "status-orb"} /><strong>{phase}</strong><span className="room-code">{session.code}</span></div>
+            {error && <div className="notice error" role="alert">{error}</div>}
 
-          {session.role === "host" && !connected && (
-            <section className="invite-panel">
-              <div><span className="section-kicker">YOUR UNIQUE CODE</span><div className="connection-code">{session.code}</div><p>Give this code to the other signed-in person, then compare the safety code after connecting.</p></div>
-              <div><span className="section-kicker">OR SHARE A PRIVATE LINK</span><div className="copy-row"><input value={inviteLink} readOnly aria-label="Private invitation link" /><button onClick={copyInvite}>Copy link</button></div><p className="link-note">The secret after # stays in the browsers and authenticates the connection automatically.</p></div>
-            </section>
-          )}
+            {session.role === "host" && !connected && (
+              <div className="connect-card">
+                <div className="code-section">
+                  <span className="label">Your code</span>
+                  <div className="connection-code">{session.code}</div>
+                  <p>Ask the other person to enter this code.</p>
+                </div>
 
-          {incomingRequest && (
-            <section className="request-card" aria-live="polite">
-              <div className="request-icon">↗</div><div><span className="section-kicker">CONNECTION REQUEST</span><h2>Someone opened your private invite</h2><p>Accept only if you are expecting this person.</p></div>
-              <div className="request-actions"><button className="ghost-button" onClick={rejectPeer}>Reject</button><button className="solid-button" onClick={acceptPeer} disabled={!guestKeyReady || busy}>{guestKeyReady ? "Verify & accept" : "Verifying invite…"}</button></div>
-            </section>
-          )}
+                <div className="divider"><span>or</span></div>
 
-          {connected && (
-            <div className="workspace-grid">
-              <section className="transfer-panel">
-                <div className="panel-heading"><div><span className="section-kicker">ENCRYPTED TRANSFER</span><h2>Choose a file</h2></div><span className="limit-pill">MAX 100 MB</span></div>
-                <label className="drop-zone">
+                <div className="link-section">
+                  <span className="label">Invitation link</span>
+                  <div className="copy-row">
+                    <input value={inviteLink} readOnly aria-label="Private invitation link" />
+                    <button className="button secondary" onClick={copyInvite}>Copy</button>
+                  </div>
+                </div>
+
+                <details className="join-existing">
+                  <summary>Use someone else&apos;s code</summary>
+                  <div className="input-action compact">
+                    <label className="sr-only" htmlFor="other-code">Connection code or invitation link</label>
+                    <input id="other-code" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Code or invitation link" autoComplete="off" spellCheck={false} />
+                    <button className="button primary" type="button" onClick={joinRoom} disabled={busy || !inviteInput}>Connect</button>
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {incomingRequest && (
+              <div className="request-card" aria-live="polite">
+                <div><strong>Connection request</strong><p>Accept only if you recognize the person.</p></div>
+                <div className="button-row">
+                  <button className="button subtle" onClick={rejectPeer}>Decline</button>
+                  <button className="button primary" onClick={acceptPeer} disabled={!guestKeyReady || busy}>{guestKeyReady ? "Accept" : "Checking…"}</button>
+                </div>
+              </div>
+            )}
+
+            {connected && (
+              <div className="transfer-card">
+                <div className="verification">
+                  <span><span className="dot online" /> Connected {relayAvailable ? "through relay" : "directly"}</span>
+                  <span>Safety code <strong>{safetyCode}</strong></span>
+                </div>
+                {connectionMode === "code" && <p className="safety-note">Compare the safety code with the other person before sending.</p>}
+
+                <label className="file-picker">
                   <input type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
-                  <span className="drop-icon">＋</span>
-                  {selectedFile ? <><strong>{selectedFile.name}</strong><small>{formatBytes(selectedFile.size)}</small></> : <><strong>Select a file to send</strong><small>It never uploads to CipherDrop</small></>}
+                  {selectedFile ? (
+                    <><strong>{selectedFile.name}</strong><span>{formatBytes(selectedFile.size)}</span></>
+                  ) : (
+                    <><strong>Choose a file</strong><span>Up to 100 MB</span></>
+                  )}
                 </label>
-                <button className="primary-button send-button" onClick={offerSelectedFile} disabled={!selectedFile || busy || fileOfferPending}>Encrypt & offer file <span>→</span></button>
+                <button className="button primary full" onClick={offerSelectedFile} disabled={!selectedFile || busy || fileOfferPending}>Send file</button>
 
                 {incomingFile && (
                   <div className="file-offer">
-                    <div><span className="section-kicker">INCOMING FILE</span><strong>{incomingFile.name}</strong><small>{formatBytes(incomingFile.size)} · approve before download</small></div>
-                    <div><button className="ghost-button" onClick={() => { void sendControl({ type: "file-reject", id: incomingFile.id }); setIncomingFile(null); }}>Decline</button><button className="solid-button" onClick={acceptFile}>Accept</button></div>
+                    <div><strong>{incomingFile.name}</strong><span>{formatBytes(incomingFile.size)}</span></div>
+                    <div className="button-row">
+                      <button className="button subtle" onClick={() => { void sendControl({ type: "file-reject", id: incomingFile.id }); setIncomingFile(null); }}>Decline</button>
+                      <button className="button primary" onClick={acceptFile}>Receive</button>
+                    </div>
                   </div>
                 )}
 
                 {transfer && (
-                  <div className="progress-card" aria-live="polite">
-                    <div className="progress-copy"><strong>{transfer.direction === "sending" ? "Sending" : "Receiving"} {transfer.name}</strong><span>{Math.round(transfer.progress)}%</span></div>
-                    <div className="progress-track"><i style={{ width: `${transfer.progress}%` }} /></div><small>{transfer.detail}</small>
+                  <div className="progress" aria-live="polite">
+                    <div><strong>{transfer.name}</strong><span>{Math.round(transfer.progress)}%</span></div>
+                    <div className="progress-track"><i style={{ width: `${transfer.progress}%` }} /></div>
+                    <small>{transfer.detail}</small>
                   </div>
                 )}
-              </section>
+              </div>
+            )}
+          </section>
+        )}
+      </div>
 
-              <aside className="security-panel">
-                <span className="section-kicker">VERIFIED SESSION</span><h2>Safety code</h2><div className="safety-code">{safetyCode}</div>
-                <p>{connectionMode === "code" ? "Code-only connection: compare this safety code with the other person before sending. Matching codes confirm your encryption keys were not replaced." : "Private-link connection authenticated. You can still compare this safety code for additional assurance."}</p>
-                <ul><li><span>✓</span>AES-256-GCM per chunk</li><li><span>✓</span>Ephemeral ECDH keys</li><li><span>✓</span>Authenticated invitation secret</li><li><span>✓</span>No server file storage</li><li><span>{relayAvailable ? "✓" : "○"}</span>{relayAvailable ? "TURN relay fallback ready" : "Direct connection mode"}</li></ul>
-              </aside>
-            </div>
-          )}
-        </section>
-      )}
-
-      <section className="assurance" aria-label="Security details">
-        <div><strong>AES-256-GCM</strong><span>Authenticated file encryption</span></div>
-        <div><strong>Ephemeral keys</strong><span>Destroyed on exit</span></div>
-        <div><strong>Zero file storage</strong><span>Browser-to-browser transfer</span></div>
-      </section>
+      <footer>End-to-end encrypted. Files are never stored by CipherDrop.</footer>
     </main>
   );
 }
