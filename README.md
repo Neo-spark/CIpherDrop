@@ -1,100 +1,117 @@
-# vinext-starter
+# CipherDrop
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Secure, temporary, end-to-end encrypted file sharing directly between two browsers. Create a one-time room, share its code or private invitation link, approve the connection, and transfer a file without creating an account.
 
-## Prerequisites
+**Live application:** [cipherdrop-secure-share.nitingaupale3.chatgpt.site](https://cipherdrop-secure-share.nitingaupale3.chatgpt.site/)
 
-- Node.js `>=22.13.0`
+![CipherDrop social preview](./public/og.png)
 
-## Quick Start
+## Why CipherDrop?
+
+Most file-sharing services require an account, upload files to permanent storage, or encourage sharing through social platforms. CipherDrop provides a focused alternative for short-lived, person-to-person transfers:
+
+- No sign-up or login
+- Unique room codes and private invitation links
+- Explicit connection and file acceptance
+- End-to-end encryption in the browser
+- Direct peer-to-peer transfer whenever the network allows it
+- No permanent file storage on the CipherDrop server
+- Automatic one-hour session expiry and manual session destruction
+- Responsive interface for desktop and mobile browsers
+
+## How it works
+
+1. The sender opens CipherDrop and receives a temporary connection code and invitation link.
+2. The receiver enters the code or opens the link.
+3. The sender reviews and accepts the connection request.
+4. Both browsers establish an encrypted WebRTC data channel.
+5. The sender selects a file and the receiver approves it before downloading.
+6. Closing or ending the session destroys the active connection; expired signaling data is removed automatically.
+
+```text
+Browser A ── temporary signaling ──> Cloudflare Worker + D1
+    │                                      │
+    └──── encrypted WebRTC data channel ───┘ Browser B
+             (file bytes travel here)
+```
+
+The Worker coordinates room creation and WebRTC negotiation. It does not receive or store the transferred file contents.
+
+## Security design
+
+- Ephemeral ECDH P-256 key pairs for every connection
+- HKDF-SHA-256 directional key derivation
+- AES-256-GCM authenticated encryption for control messages and file chunks
+- HMAC-SHA-256 authenticated invitation handshake
+- Independent send and receive keys with sequence-based nonces
+- Replay detection for encrypted packets
+- SHA-256 file integrity verification before download completion
+- Random bearer tokens for host and guest signaling authorization
+- Same-origin API enforcement, strict security headers, and anonymous rate limiting
+- Optional TURN relay support for restrictive networks
+
+When joining with a manually entered code, both users should compare the displayed six-digit safety code before sending sensitive data. CipherDrop has not undergone an independent security audit, so review the implementation before using it for high-risk information.
+
+## Technology
+
+- React 19 and TypeScript
+- vinext and Vite
+- Cloudflare Workers
+- Cloudflare D1 for temporary signaling state
+- WebRTC data channels for peer-to-peer transfer
+- Web Crypto API for key exchange, encryption, and integrity checks
+
+## Local development
+
+### Requirements
+
+- Node.js 22.13 or newer
+- npm
+
+### Start the application
 
 ```bash
+git clone https://github.com/Neo-spark/CIpherDrop.git
+cd CIpherDrop
 npm install
 npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) in your browser. To test a transfer, open the application in two browser windows and connect them using the generated code or invitation link.
+
+### Validation
+
+```bash
+npm run lint
+npx tsc --noEmit
+node --test tests/cipher.test.mjs
 npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+## Configuration
 
-## Included Shape
+The application expects a Cloudflare D1 binding named `DB`. Direct connections use Cloudflare's public STUN service by default. TURN relay support is optional and can be enabled with:
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```env
+TURN_KEY_ID=your_cloudflare_turn_key_id
+TURN_API_TOKEN=your_cloudflare_turn_api_token
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+Do not commit real credentials or local environment files.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+## Current limits
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+- Maximum file size: 100 MB
+- One receiver per temporary room
+- Modern browsers with WebRTC and Web Crypto support are required
+- A TURN configuration may be required when either user is behind a restrictive firewall
+- Files are held in receiver browser memory until verification and download
+- CipherDrop does not scan files for malware; only accept files from people you trust
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+## Privacy
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+CipherDrop stores only short-lived room and signaling records required to connect two browsers. File contents are encrypted and transferred through the WebRTC data channel rather than uploaded to application storage. Rooms expire after one hour and can be ended immediately by either participant.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+## License
 
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Released under the [MIT License](./LICENSE).
