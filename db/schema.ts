@@ -3,7 +3,9 @@ import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 export const sessions = sqliteTable("sessions", {
   code: text("code").primaryKey(),
   hostTokenHash: text("host_token_hash").notNull(),
+  hostUserHash: text("host_user_hash"),
   guestTokenHash: text("guest_token_hash"),
+  guestUserHash: text("guest_user_hash"),
   status: text("status").notNull().default("waiting"),
   createdAt: integer("created_at").notNull(),
   expiresAt: integer("expires_at").notNull(),

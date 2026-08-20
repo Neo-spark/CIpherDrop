@@ -21,6 +21,10 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .brand-button { border: 0; background: transparent; padding: 0; }
 .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; color: var(--mint); background: var(--ink); border-radius: 8px 8px 8px 2px; font-family: Georgia, serif; font-style: italic; }
 .privacy-pill { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.nav-actions { display: flex; align-items: center; gap: 16px; }
+.user-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 800; }
+.sign-out { color: rgba(7,27,29,.62); font-size: 12px; font-weight: 700; text-decoration: none; }
+.sign-out:hover { color: var(--ink); text-decoration: underline; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #28ba72; box-shadow: 0 0 0 5px rgba(40, 186, 114, .13); }
 .hero { max-width: 1120px; margin: 0 auto; padding: 74px 0 52px; position: relative; }
 .eyebrow { display: flex; align-items: center; gap: 14px; font-size: 11px; letter-spacing: .18em; font-weight: 900; }
@@ -61,6 +65,8 @@ h1 em { color: var(--teal); font-weight: 400; }
 .copy-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .copy-row input { min-width: 0; padding: 13px; color: white; border: 1px solid rgba(255,255,255,.2); border-radius: 9px; background: rgba(255,255,255,.08); font: 12px 'Courier New', monospace; }
 .copy-row button { border: 0; border-radius: 9px; padding: 0 18px; background: var(--mint); color: var(--ink); font-weight: 800; }
+.connection-code { margin: 12px 0 14px; color: var(--mint); font: 700 clamp(32px, 5vw, 52px)/1 'Courier New', monospace; letter-spacing: .08em; }
+.link-note { margin-top: 10px !important; }
 .request-card { margin-top: 18px; padding: 24px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 20px; border: 1px solid rgba(18,60,59,.25); border-radius: 16px; background: #fff; box-shadow: 0 20px 60px rgba(7,27,29,.07); }
 .request-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; color: var(--mint); background: var(--teal); font-size: 22px; }
 .request-actions, .file-offer > div:last-child { display: flex; gap: 8px; }
@@ -97,6 +103,8 @@ h1 em { color: var(--teal); font-weight: 400; }
   .shell { padding-inline: 20px; }
   .nav { height: 72px; }
   .privacy-pill { font-size: 0; }
+  .nav-actions { gap: 10px; }
+  .user-name { display: none; }
   .hero { padding-top: 50px; }
   h1 { font-size: clamp(56px, 18vw, 88px); }
   .hero-copy { font-size: 16px; }
