@@ -11,6 +11,15 @@ import {
   SessionCipher,
   sha256,
 } from "./cipher";
+import {
+  CHUNK_SIZE,
+  type FileOffer,
+  isBlockedExecutable,
+  MAX_CONTROL_PACKET_LENGTH,
+  MAX_ENCRYPTED_CHUNK_SIZE,
+  MAX_FILE_SIZE,
+  validateFileOffer,
+} from "@/lib/file-protocol";
 
 type Role = "host" | "guest";
 type Session = {
@@ -23,13 +32,11 @@ type Session = {
   expiresAt: number;
 };
 type SignalEvent = { id: number; type: string; payload: Record<string, unknown> };
-type FileOffer = { id: string; name: string; size: number; type: string; hash: string; chunks: number };
 type Transfer = { name: string; direction: "sending" | "receiving"; progress: number; detail: string };
 
-const CHUNK_SIZE = 64 * 1024;
-const MAX_FILE_SIZE = 100 * 1024 * 1024;
 const defaultIceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/u, "");
+const RELAY_ONLY = process.env.NEXT_PUBLIC_RELAY_ONLY === "true";
 
 async function api<T>(path: string, options: RequestInit = {}, session?: Session): Promise<T> {
   if (!API_BASE_URL) throw new Error("The connection service is not configured");
@@ -102,6 +109,7 @@ export default function CipherDropClient() {
   const handleSignalRef = useRef<(event: SignalEvent) => Promise<void>>(async () => undefined);
   const handleControlRef = useRef<(message: Record<string, unknown>) => Promise<void>>(async () => undefined);
   const iceServersRef = useRef<RTCIceServer[]>(defaultIceServers);
+  const relayAvailableRef = useRef(false);
   const autoRoomRef = useRef(false);
 
   useEffect(() => { sessionRef.current = session; }, [session]);
@@ -132,9 +140,11 @@ export default function CipherDropClient() {
     try {
       const result = await api<{ iceServers: RTCIceServer[]; relayAvailable: boolean }>(`/api/sessions/${target.code}/ice?role=${target.role}`, {}, target);
       iceServersRef.current = result.iceServers.length ? result.iceServers : defaultIceServers;
+      relayAvailableRef.current = result.relayAvailable;
       setRelayAvailable(result.relayAvailable);
     } catch {
       iceServersRef.current = defaultIceServers;
+      relayAvailableRef.current = false;
       setRelayAvailable(false);
     }
   };
@@ -158,14 +168,24 @@ export default function CipherDropClient() {
         const cipher = cipherRef.current;
         if (!cipher) throw new Error("Encryption keys are unavailable");
         if (typeof event.data === "string") {
+          if (event.data.length > MAX_CONTROL_PACKET_LENGTH) throw new Error("Encrypted control message exceeded the safety limit");
           await handleControlRef.current(await cipher.decryptControl(event.data));
           return;
+        }
+        if (!(event.data instanceof ArrayBuffer) || event.data.byteLength > MAX_ENCRYPTED_CHUNK_SIZE) {
+          throw new Error("Encrypted file chunk exceeded the safety limit");
         }
         const chunk = await cipher.decryptChunk(event.data as ArrayBuffer);
         const receiving = receiveRef.current;
         if (!receiving) throw new Error("Unexpected encrypted file data");
+        const nextBytes = receiving.bytes + chunk.byteLength;
+        if (chunk.byteLength > CHUNK_SIZE
+          || nextBytes > receiving.offer.size
+          || receiving.chunks.length + 1 > receiving.offer.chunks) {
+          throw new Error("The sender exceeded the approved file bounds");
+        }
         receiving.chunks.push(chunk);
-        receiving.bytes += chunk.byteLength;
+        receiving.bytes = nextBytes;
         setTransfer({
           name: receiving.offer.name,
           direction: "receiving",
@@ -173,14 +193,22 @@ export default function CipherDropClient() {
           detail: `${formatBytes(receiving.bytes)} of ${formatBytes(receiving.offer.size)}`,
         });
       } catch (caught) {
+        receiveRef.current = null;
+        channel.close();
+        peerRef.current?.close();
+        setConnected(false);
         setError(caught instanceof Error ? caught.message : "Encrypted packet verification failed");
       }
     };
   }, []);
 
   const setupPeer = useCallback((role: Role) => {
+    if (RELAY_ONLY && !relayAvailableRef.current) throw new Error("Private relay mode is required but no TURN relay is configured");
     peerRef.current?.close();
-    const peer = new RTCPeerConnection({ iceServers: iceServersRef.current });
+    const peer = new RTCPeerConnection({
+      iceServers: iceServersRef.current,
+      iceTransportPolicy: RELAY_ONLY ? "relay" : "all",
+    });
     peerRef.current = peer;
     pendingIceRef.current = [];
     peer.onicecandidate = (event) => {
@@ -399,6 +427,7 @@ export default function CipherDropClient() {
     setBusy(true); setError("");
     try {
       if (selectedFile.size > MAX_FILE_SIZE) throw new Error("This version accepts files up to 100 MB to protect browser memory");
+      if (isBlockedExecutable(selectedFile.name)) throw new Error("Executable and script files are blocked for safety");
       const hash = await sha256(await selectedFile.arrayBuffer());
       const offer: FileOffer = {
         id: crypto.randomUUID(), name: selectedFile.name, size: selectedFile.size,
@@ -425,6 +454,7 @@ export default function CipherDropClient() {
     const receiving = receiveRef.current;
     if (!receiving || receiving.offer.id !== id) throw new Error("File completion message did not match the active transfer");
     if (receiving.bytes !== receiving.offer.size) throw new Error("The received file size did not match");
+    if (receiving.chunks.length !== receiving.offer.chunks) throw new Error("The received file chunk count did not match");
     const blob = new Blob(receiving.chunks, { type: receiving.offer.type });
     const actualHash = await sha256(await blob.arrayBuffer());
     if (!constantTimeEqual(actualHash, receiving.offer.hash)) throw new Error("File integrity verification failed");
@@ -442,8 +472,8 @@ export default function CipherDropClient() {
   const handleControl = async (message: Record<string, unknown>) => {
     const type = String(message.type || "");
     if (type === "file-offer") {
-      const offer = message.offer as unknown as FileOffer;
-      if (!offer || offer.size < 0 || offer.size > MAX_FILE_SIZE || offer.name.length > 255) throw new Error("Unsafe file offer rejected");
+      const offer = message.offer;
+      if (!validateFileOffer(offer) || isBlockedExecutable(offer.name)) throw new Error("Unsafe file offer rejected");
       setIncomingFile(offer); return;
     }
     if (type === "file-accept") {
@@ -567,6 +597,7 @@ export default function CipherDropClient() {
                   <span>Safety code <strong>{safetyCode}</strong></span>
                 </div>
                 {connectionMode === "code" && <p className="safety-note">Compare the safety code with the other person before sending.</p>}
+                {!RELAY_ONLY && <p className="safety-note">Direct peer connections can reveal your IP address to the other person.</p>}
 
                 <label className="file-picker">
                   <input type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
@@ -580,7 +611,7 @@ export default function CipherDropClient() {
 
                 {incomingFile && (
                   <div className="file-offer">
-                    <div><strong>{incomingFile.name}</strong><span>{formatBytes(incomingFile.size)}</span></div>
+                    <div><strong>{incomingFile.name}</strong><span>{formatBytes(incomingFile.size)} · Not malware-scanned</span></div>
                     <div className="button-row">
                       <button className="button subtle" onClick={() => { void sendControl({ type: "file-reject", id: incomingFile.id }); setIncomingFile(null); }}>Decline</button>
                       <button className="button primary" onClick={acceptFile}>Receive</button>
@@ -591,7 +622,7 @@ export default function CipherDropClient() {
                 {transfer && (
                   <div className="progress" aria-live="polite">
                     <div><strong>{transfer.name}</strong><span>{Math.round(transfer.progress)}%</span></div>
-                    <div className="progress-track"><i style={{ width: `${transfer.progress}%` }} /></div>
+                    <progress className="progress-track" max={100} value={transfer.progress} aria-label="File transfer progress" />
                     <small>{transfer.detail}</small>
                   </div>
                 )}

@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test tests/cipher.test.mjs",
+    "test": "node --test tests/cipher.test.mjs tests/file-protocol.test.mjs",
     "lint": "eslint . --ignore-pattern .next"
   },
   "dependencies": {

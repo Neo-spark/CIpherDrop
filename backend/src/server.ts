@@ -5,11 +5,11 @@ import express, { type NextFunction, type Request, type Response } from "express
 import helmet from "helmet";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { validateSignalPayload } from "./validation.js";
 
 loadEnvironment({ path: ["../.env.local", ".env.local", ".env"] });
 
 const SESSION_SECONDS = 60 * 60;
-const allowedSignals = new Set(["join-request", "guest-key", "accept", "reject", "offer", "answer", "ice", "leave"]);
 const frontendOrigins = new Set(
   (process.env.FRONTEND_ORIGINS || "http://localhost:3000")
     .split(",")
@@ -50,6 +50,42 @@ const joinRateLimit = new Ratelimit({
   redis,
   limiter: Ratelimit.slidingWindow(40, "1 m"),
   prefix: "cipherdrop:rate:join",
+  analytics: false,
+});
+const signalReadTokenRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(150, "1 m"),
+  prefix: "cipherdrop:rate:signal-read-token",
+  analytics: false,
+});
+const signalReadIpRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(600, "1 m"),
+  prefix: "cipherdrop:rate:signal-read-ip",
+  analytics: false,
+});
+const signalWriteTokenRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(90, "1 m"),
+  prefix: "cipherdrop:rate:signal-write-token",
+  analytics: false,
+});
+const signalWriteIpRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(300, "1 m"),
+  prefix: "cipherdrop:rate:signal-write-ip",
+  analytics: false,
+});
+const iceTokenRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(12, "10 m"),
+  prefix: "cipherdrop:rate:ice-token",
+  analytics: false,
+});
+const iceIpRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(60, "10 m"),
+  prefix: "cipherdrop:rate:ice-ip",
   analytics: false,
 });
 
@@ -94,6 +130,27 @@ function sendJson(response: Response, data: unknown, status = 200) {
   response.status(status).set("Cache-Control", "no-store, max-age=0").json(data);
 }
 
+async function enforceAuthenticatedLimit(
+  request: Request,
+  response: Response,
+  tokenLimiter: Ratelimit,
+  ipLimiter: Ratelimit,
+  message: string,
+) {
+  const code = response.locals.code as string;
+  const role = response.locals.role as Role;
+  const tokenHash = response.locals.tokenHash as string;
+  const [tokenResult, ipResult] = await Promise.all([
+    tokenLimiter.limit(`${code}:${role}:${tokenHash}`),
+    ipLimiter.limit(fingerprint(request)),
+  ]);
+  const denied = !tokenResult.success ? tokenResult : !ipResult.success ? ipResult : null;
+  if (!denied) return true;
+  response.set("Retry-After", String(Math.max(1, Math.ceil((denied.reset - Date.now()) / 1_000))));
+  sendJson(response, { error: message }, 429);
+  return false;
+}
+
 function roleFrom(request: Request): Role | null {
   return request.query.role === "host" || request.query.role === "guest" ? request.query.role : null;
 }
@@ -128,6 +185,7 @@ async function requireSession(request: Request, response: Response, next: NextFu
   }
   response.locals.code = code;
   response.locals.role = role;
+  response.locals.tokenHash = hash(token);
   next();
 }
 
@@ -219,7 +277,13 @@ app.post("/api/sessions/:code/join", async (request, response, next) => {
   }
 });
 
-app.get("/api/sessions/:code/ice", requireSession, async (_request, response) => {
+app.get("/api/sessions/:code/ice", requireSession, async (request, response, next) => {
+  try {
+    if (!await enforceAuthenticatedLimit(request, response, iceTokenRateLimit, iceIpRateLimit, "Too many relay credential requests")) return;
+  } catch (error) {
+    next(error);
+    return;
+  }
   const fallback = [{ urls: "stun:stun.cloudflare.com:3478" }];
   if (!process.env.TURN_KEY_ID || !process.env.TURN_API_TOKEN) {
     sendJson(response, { iceServers: fallback, relayAvailable: false });
@@ -249,6 +313,7 @@ app.get("/api/sessions/:code/ice", requireSession, async (_request, response) =>
 
 app.get("/api/sessions/:code/signals", requireSession, async (request, response, next) => {
   try {
+    if (!await enforceAuthenticatedLimit(request, response, signalReadTokenRateLimit, signalReadIpRateLimit, "Signaling is being polled too quickly")) return;
     const code = response.locals.code as string;
     const role = response.locals.role as Role;
     const after = Math.max(0, Number(request.query.after || "0"));
@@ -261,13 +326,12 @@ app.get("/api/sessions/:code/signals", requireSession, async (request, response,
 
 app.post("/api/sessions/:code/signals", requireSession, async (request, response, next) => {
   try {
+    if (!await enforceAuthenticatedLimit(request, response, signalWriteTokenRateLimit, signalWriteIpRateLimit, "Too many signaling messages")) return;
     const code = response.locals.code as string;
     const role = response.locals.role as Role;
     const type = String(request.body?.type || "");
-    const payload = request.body?.payload && typeof request.body.payload === "object"
-      ? request.body.payload as Record<string, unknown>
-      : {};
-    if (!allowedSignals.has(type) || JSON.stringify(payload).length > 60_000) {
+    const payload = request.body?.payload;
+    if (!validateSignalPayload(type, payload)) {
       sendJson(response, { error: "Invalid signal" }, 400);
       return;
     }

@@ -47,7 +47,10 @@ The Node.js API on Render coordinates room creation and WebRTC negotiation. It d
 - Replay detection for encrypted packets
 - SHA-256 file integrity verification before download completion
 - Random bearer tokens for host and guest signaling authorization
-- Strict frontend-origin allowlisting, security headers, and anonymous rate limiting
+- Strict frontend-origin allowlisting, nonce-based Content Security Policy, and security headers
+- Per-IP and per-session rate limits on room, signaling, and relay operations
+- Strict signaling schemas, encrypted packet bounds, and receiver memory enforcement
+- Common executable and script file types blocked by default
 - Optional TURN relay support for restrictive networks
 
 When joining with a manually entered code, both users should compare the displayed six-digit safety code before sending sensitive data. CipherDrop has not undergone an independent security audit, so review the implementation before using it for high-risk information.
@@ -122,7 +125,10 @@ Set the public backend URL on Vercel:
 
 ```env
 NEXT_PUBLIC_API_URL=https://your-render-service.onrender.com
+NEXT_PUBLIC_RELAY_ONLY=false
 ```
+
+Set `NEXT_PUBLIC_RELAY_ONLY=true` only after TURN credentials are configured on the backend. Relay-only mode prevents direct ICE candidates from exposing peer network addresses, at the cost of routing encrypted file traffic through TURN.
 
 Do not commit real credentials or local environment files.
 
@@ -133,7 +139,8 @@ Do not commit real credentials or local environment files.
 - Modern browsers with WebRTC and Web Crypto support are required
 - A TURN configuration may be required when either user is behind a restrictive firewall
 - Files are held in receiver browser memory until verification and download
-- CipherDrop does not scan files for malware; only accept files from people you trust
+- CipherDrop blocks common executable and script extensions, but cannot fully scan end-to-end encrypted files for malware; only accept files from people you trust
+- Direct peer connections can expose IP address information to the other participant; enable relay-only mode when network privacy is required
 
 ## Privacy
 

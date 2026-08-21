@@ -31,6 +31,7 @@ export async function authenticateHandshake(secret: string, message: string) {
 export function constantTimeEqual(left: string, right: string) {
   const a = textEncoder.encode(left);
   const b = textEncoder.encode(right);
+  if (a.length === 0 || b.length === 0 || a.length !== b.length) return false;
   let difference = a.length ^ b.length;
   const length = Math.max(a.length, b.length);
   for (let index = 0; index < length; index += 1) difference |= (a[index % a.length] ?? 0) ^ (b[index % b.length] ?? 0);
@@ -80,9 +81,16 @@ export class SessionCipher {
     return value;
   }
 
-  private checkReplay(kind: string, sequence: bigint) {
+  private replayKey(kind: string, sequence: bigint) {
+    return `${kind}:${sequence.toString()}`;
+  }
+
+  private ensureNotReplayed(kind: string, sequence: bigint) {
+    if (this.receivedSequences.has(this.replayKey(kind, sequence))) throw new Error("Replay detected");
+  }
+
+  private recordSequence(kind: string, sequence: bigint) {
     const key = `${kind}:${sequence.toString()}`;
-    if (this.receivedSequences.has(key)) throw new Error("Replay detected");
     this.receivedSequences.add(key);
     if (this.receivedSequences.size > 20_000) {
       const first = this.receivedSequences.values().next().value;
@@ -102,16 +110,20 @@ export class SessionCipher {
   }
 
   async decryptControl(packet: string) {
-    const [version, rawSequence, ciphertext] = packet.split(":");
-    if (version !== "CD1" || !rawSequence || !ciphertext) throw new Error("Invalid encrypted packet");
+    const parts = packet.split(":");
+    if (parts.length !== 3) throw new Error("Invalid encrypted packet");
+    const [version, rawSequence, ciphertext] = parts;
+    if (version !== "CD1" || !/^\d{1,20}$/u.test(rawSequence) || !ciphertext) throw new Error("Invalid encrypted packet");
     const sequence = BigInt(rawSequence);
-    this.checkReplay("control", sequence);
+    if (sequence > 0xffff_ffff_ffff_ffffn) throw new Error("Invalid encrypted packet sequence");
+    this.ensureNotReplayed("control", sequence);
     const cleartext = await crypto.subtle.decrypt({
       name: "AES-GCM",
       iv: nonce(this.receivePrefix, sequence),
       additionalData: additionalData(this.code, "control", sequence),
       tagLength: 128,
     }, this.receiveKey, base64UrlToBytes(ciphertext));
+    this.recordSequence("control", sequence);
     return JSON.parse(new TextDecoder().decode(cleartext)) as Record<string, unknown>;
   }
 
@@ -134,13 +146,15 @@ export class SessionCipher {
     const bytes = new Uint8Array(packet);
     if (bytes[0] !== 1 || bytes.length < 26) throw new Error("Invalid chunk packet");
     const sequence = new DataView(packet).getBigUint64(1, false);
-    this.checkReplay("chunk", sequence);
-    return await crypto.subtle.decrypt({
+    this.ensureNotReplayed("chunk", sequence);
+    const cleartext = await crypto.subtle.decrypt({
       name: "AES-GCM",
       iv: nonce(this.receivePrefix, sequence),
       additionalData: additionalData(this.code, "chunk", sequence),
       tagLength: 128,
     }, this.receiveKey, bytes.slice(9));
+    this.recordSequence("chunk", sequence);
+    return cleartext;
   }
 }
 

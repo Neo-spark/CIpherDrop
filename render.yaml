@@ -12,7 +12,7 @@ services:
       - key: NODE_VERSION
         value: 22.13.0
       - key: FRONTEND_ORIGINS
-        value: https://cipherdrop-nu.vercel.app,http://localhost:3000
+        value: https://cipherdrop-nu.vercel.app
       - key: KV_REST_API_URL
         sync: false
       - key: KV_REST_API_TOKEN
