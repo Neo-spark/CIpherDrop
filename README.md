@@ -1,6 +1,6 @@
 # CipherDrop
 
-Secure, temporary, end-to-end encrypted file sharing directly between two browsers. Create a one-time room, share its code or private invitation link, approve the connection, and transfer a file without creating an account.
+Secure, temporary, end-to-end encrypted one-way file sharing directly between two browsers. Choose whether the current device sends or receives, create a one-time room, pair with its code or private QR invitation, and transfer files without creating an account.
 
 **Live application:** [cipherdrop-nu.vercel.app](https://cipherdrop-nu.vercel.app/)
 
@@ -12,6 +12,8 @@ Most file-sharing services require an account, upload files to permanent storage
 
 - No sign-up or login
 - Unique room codes and private invitation links
+- Locally generated private QR invitations
+- One immutable transfer direction per session
 - Explicit connection and file acceptance
 - End-to-end encryption in the browser
 - Direct peer-to-peer transfer whenever the network allows it
@@ -21,12 +23,14 @@ Most file-sharing services require an account, upload files to permanent storage
 
 ## How it works
 
-1. The sender opens CipherDrop and receives a temporary connection code and invitation link.
-2. The receiver enters the code or opens the link.
-3. The sender reviews and accepts the connection request.
-4. Both browsers establish an encrypted WebRTC data channel.
-5. The sender selects a file and the receiver approves it before downloading.
-6. Closing or ending the session destroys the active connection; expired signaling data is removed automatically.
+1. The creator chooses whether the current device will send or receive.
+2. CipherDrop displays a temporary connection code, private QR invitation, and invitation link.
+3. The other device scans the QR code, enters the code, or opens the link.
+4. The creator reviews and accepts the connection request.
+5. Both browsers establish an encrypted WebRTC data channel with the chosen direction bound into the session keys.
+6. The sender selects a file and the receiver approves it before transfer.
+7. Verified files remain in a temporary receiver-side tray until the receiver explicitly views, downloads, or removes them.
+8. Ending the session clears the tray and destroys the active connection.
 
 ```text
 Browser A ── temporary signaling ──> Render Node API + Upstash Redis
@@ -46,6 +50,7 @@ The Node.js API on Render coordinates room creation and WebRTC negotiation. It d
 - Independent send and receive keys with sequence-based nonces
 - Replay detection for encrypted packets
 - SHA-256 file integrity verification before download completion
+- Authenticated, immutable sender and receiver roles for each room
 - Random bearer tokens for host and guest signaling authorization
 - Strict frontend-origin allowlisting, nonce-based Content Security Policy, and security headers
 - Per-IP and per-session rate limits on room, signaling, and relay operations
@@ -135,10 +140,13 @@ Do not commit real credentials or local environment files.
 ## Current limits
 
 - Maximum file size: 100 MB
+- Maximum combined received-file tray size: 100 MB
 - One receiver per temporary room
+- One sequential transfer at a time in the room's locked direction
 - Modern browsers with WebRTC and Web Crypto support are required
 - A TURN configuration may be required when either user is behind a restrictive firewall
-- Files are held in receiver browser memory until verification and download
+- Verified files are held only in receiver browser memory until removal, session end, refresh, or tab close
+- Raster images, PDFs, bounded plain text, audio, and video can be previewed; unsupported types are download-only
 - CipherDrop blocks common executable and script extensions, but cannot fully scan end-to-end encrypted files for malware; only accept files from people you trust
 - Direct peer connections can expose IP address information to the other participant; enable relay-only mode when network privacy is required
 

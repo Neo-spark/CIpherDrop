@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
+import QRCode from "qrcode";
 import {
   authenticateHandshake,
   constantTimeEqual,
@@ -20,8 +22,17 @@ import {
   MAX_FILE_SIZE,
   validateFileOffer,
 } from "@/lib/file-protocol";
+import {
+  fitsReceivedTray,
+  isTransferDirection,
+  previewKindFor,
+  RECEIVED_TRAY_LIMIT,
+  senderRole,
+  type PreviewKind,
+  type Role,
+  type TransferDirection,
+} from "@/lib/transfer-session";
 
-type Role = "host" | "guest";
 type Session = {
   code: string;
   token: string;
@@ -30,9 +41,11 @@ type Session = {
   keyPair: CryptoKeyPair;
   publicKey: string;
   expiresAt: number;
+  direction: TransferDirection;
 };
 type SignalEvent = { id: number; type: string; payload: Record<string, unknown> };
 type Transfer = { name: string; direction: "sending" | "receiving"; progress: number; detail: string };
+type ReceivedFile = FileOffer & { blob: Blob; url: string; previewKind: PreviewKind | null };
 
 const defaultIceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/u, "");
@@ -82,6 +95,7 @@ export default function CipherDropClient() {
   const [session, setSession] = useState<Session | null>(null);
   const [inviteInput, setInviteInput] = useState("");
   const [inviteLink, setInviteLink] = useState("");
+  const [qrCodeUrl, setQrCodeUrl] = useState("");
   const [phase, setPhase] = useState("Ready for a private transfer");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -95,6 +109,9 @@ export default function CipherDropClient() {
   const [fileOfferPending, setFileOfferPending] = useState(false);
   const [relayAvailable, setRelayAvailable] = useState(false);
   const [connectionMode, setConnectionMode] = useState<"link" | "code">("link");
+  const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
+  const [previewingFile, setPreviewingFile] = useState<ReceivedFile | null>(null);
+  const [textPreview, setTextPreview] = useState("");
 
   const sessionRef = useRef<Session | null>(null);
   const cipherRef = useRef<SessionCipher | null>(null);
@@ -110,9 +127,21 @@ export default function CipherDropClient() {
   const handleControlRef = useRef<(message: Record<string, unknown>) => Promise<void>>(async () => undefined);
   const iceServersRef = useRef<RTCIceServer[]>(defaultIceServers);
   const relayAvailableRef = useRef(false);
-  const autoRoomRef = useRef(false);
+  const receivedFilesRef = useRef<ReceivedFile[]>([]);
 
   useEffect(() => { sessionRef.current = session; }, [session]);
+
+  const replaceReceivedFiles = useCallback((files: ReceivedFile[]) => {
+    receivedFilesRef.current = files;
+    setReceivedFiles(files);
+  }, []);
+
+  const clearReceivedFiles = useCallback(() => {
+    for (const file of receivedFilesRef.current) URL.revokeObjectURL(file.url);
+    replaceReceivedFiles([]);
+    setPreviewingFile(null);
+    setTextPreview("");
+  }, [replaceReceivedFiles]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -155,12 +184,16 @@ export default function CipherDropClient() {
     channel.bufferedAmountLowThreshold = 512 * 1024;
     channel.onopen = () => {
       setConnected(true);
-      setPhase("Encrypted peer connection established");
+      const target = sessionRef.current;
+      setPhase(target && senderRole(target.direction) === target.role
+        ? "Connected securely — this device can send"
+        : "Connected securely — this device can receive");
       if (cipherRef.current) setSafetyCode(cipherRef.current.safetyCode);
     };
     channel.onclose = () => {
       setConnected(false);
       setPhase("The private connection ended");
+      clearReceivedFiles();
     };
     channel.onerror = () => setError("The encrypted data channel reported an error");
     channel.onmessage = async (event) => {
@@ -175,6 +208,8 @@ export default function CipherDropClient() {
         if (!(event.data instanceof ArrayBuffer) || event.data.byteLength > MAX_ENCRYPTED_CHUNK_SIZE) {
           throw new Error("Encrypted file chunk exceeded the safety limit");
         }
+        const target = sessionRef.current;
+        if (!target || senderRole(target.direction) === target.role) throw new Error("The receiving direction was violated");
         const chunk = await cipher.decryptChunk(event.data as ArrayBuffer);
         const receiving = receiveRef.current;
         if (!receiving) throw new Error("Unexpected encrypted file data");
@@ -200,7 +235,7 @@ export default function CipherDropClient() {
         setError(caught instanceof Error ? caught.message : "Encrypted packet verification failed");
       }
     };
-  }, []);
+  }, [clearReceivedFiles]);
 
   const setupPeer = useCallback((role: Role) => {
     if (RELAY_ONLY && !relayAvailableRef.current) throw new Error("Private relay mode is required but no TURN relay is configured");
@@ -238,36 +273,35 @@ export default function CipherDropClient() {
       hostPublicKey,
       guestPublicKey,
       invitationSecret: target.secret,
+      transferDirection: target.direction,
     });
     cipherRef.current = cipher;
     setSafetyCode(cipher.safetyCode);
     return cipher;
   }, []);
 
-  const createRoom = async () => {
+  const createRoom = async (direction: TransferDirection) => {
     setBusy(true); setError("");
     try {
       const secret = createInvitationSecret();
       const ephemeral = await createEphemeralKeyPair();
-      const created = await api<{ code: string; token: string; expiresAt: number }>("/api/sessions", { method: "POST" });
+      const created = await api<{ code: string; token: string; direction: TransferDirection; expiresAt: number }>("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({ direction }),
+      });
+      if (!isTransferDirection(created.direction) || created.direction !== direction) throw new Error("The room direction could not be verified");
       const next: Session = { ...created, role: "host", secret, ...ephemeral };
       sessionRef.current = next;
       setSession(next);
       await loadIceConfig(next);
-      setInviteLink(`${window.location.origin}/?room=${encodeURIComponent(created.code)}#k=${secret}`);
+      const invitation = `${window.location.origin}/?room=${encodeURIComponent(created.code)}#k=${secret}`;
+      setInviteLink(invitation);
+      setQrCodeUrl(await QRCode.toDataURL(invitation, { errorCorrectionLevel: "M", margin: 1, width: 220 }));
       setPhase("Waiting for one trusted person");
       lastEventRef.current = 0;
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not create room"); }
     finally { setBusy(false); }
   };
-
-  useEffect(() => {
-    if (autoRoomRef.current || sessionRef.current || new URLSearchParams(window.location.search).has("room")) return;
-    autoRoomRef.current = true;
-    void createRoom();
-    // Every visitor receives one temporary code automatically on arrival.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const joinRoom = async () => {
     setBusy(true); setError("");
@@ -281,7 +315,8 @@ export default function CipherDropClient() {
         sessionRef.current = null;
       }
       const ephemeral = await createEphemeralKeyPair();
-      const joined = await api<{ code: string; token: string; expiresAt: number }>(`/api/sessions/${parsed.code}/join`, { method: "POST" });
+      const joined = await api<{ code: string; token: string; direction: TransferDirection; expiresAt: number }>(`/api/sessions/${parsed.code}/join`, { method: "POST" });
+      if (!isTransferDirection(joined.direction)) throw new Error("The room has an invalid transfer direction");
       const next: Session = { ...joined, role: "guest", secret: parsed.secret, ...ephemeral };
       sessionRef.current = next;
       setSession(next);
@@ -290,8 +325,8 @@ export default function CipherDropClient() {
       setConnectionMode(parsed.mode);
       negotiatedSecretRef.current = parsed.secret;
       lastEventRef.current = 0;
-      const mac = await authenticateHandshake(parsed.secret, `guest-key|${parsed.code}|${ephemeral.publicKey}`);
-      await sendSignal("guest-key", { publicKey: ephemeral.publicKey, mac, mode: parsed.mode }, next);
+      const mac = await authenticateHandshake(parsed.secret, `guest-key|${parsed.code}|${next.direction}|${ephemeral.publicKey}`);
+      await sendSignal("guest-key", { publicKey: ephemeral.publicKey, mac, mode: parsed.mode, direction: next.direction }, next);
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not join room"); }
     finally { setBusy(false); }
   };
@@ -303,11 +338,11 @@ export default function CipherDropClient() {
     setBusy(true); setError("");
     try {
       const handshakeSecret = negotiatedSecretRef.current || target.secret;
-      const expected = await authenticateHandshake(handshakeSecret, `guest-key|${target.code}|${guest.publicKey}`);
+      const expected = await authenticateHandshake(handshakeSecret, `guest-key|${target.code}|${target.direction}|${guest.publicKey}`);
       if (!constantTimeEqual(expected, guest.mac)) throw new Error("The invitation authentication check failed");
       await deriveCipher({ ...target, secret: handshakeSecret }, guest.publicKey, target.publicKey, guest.publicKey);
-      const mac = await authenticateHandshake(handshakeSecret, `accept|${target.code}|${target.publicKey}|${guest.publicKey}`);
-      await sendSignal("accept", { publicKey: target.publicKey, guestPublicKey: guest.publicKey, mac });
+      const mac = await authenticateHandshake(handshakeSecret, `accept|${target.code}|${target.direction}|${target.publicKey}|${guest.publicKey}`);
+      await sendSignal("accept", { publicKey: target.publicKey, guestPublicKey: guest.publicKey, mac, direction: target.direction });
       const peer = setupPeer("host");
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
@@ -331,6 +366,7 @@ export default function CipherDropClient() {
       setIncomingRequest(true); setPhase("Connection request received"); return;
     }
     if (event.type === "guest-key" && target.role === "host") {
+      if (event.payload.direction !== target.direction) throw new Error("The peer requested a different transfer direction");
       guestHandshakeRef.current = { publicKey: String(event.payload.publicKey), mac: String(event.payload.mac) };
       const mode = event.payload.mode === "code" ? "code" : "link";
       setConnectionMode(mode);
@@ -344,8 +380,9 @@ export default function CipherDropClient() {
       const hostPublicKey = String(event.payload.publicKey);
       const guestPublicKey = String(event.payload.guestPublicKey);
       const mac = String(event.payload.mac);
+      if (event.payload.direction !== target.direction) throw new Error("The host changed the transfer direction");
       if (guestPublicKey !== target.publicKey) throw new Error("Handshake identity mismatch");
-      const expected = await authenticateHandshake(target.secret, `accept|${target.code}|${hostPublicKey}|${guestPublicKey}`);
+      const expected = await authenticateHandshake(target.secret, `accept|${target.code}|${target.direction}|${hostPublicKey}|${guestPublicKey}`);
       if (!constantTimeEqual(expected, mac)) throw new Error("Peer authentication failed. End this session.");
       await deriveCipher(target, hostPublicKey, hostPublicKey, guestPublicKey);
       setupPeer("guest");
@@ -371,7 +408,7 @@ export default function CipherDropClient() {
       else pendingIceRef.current.push(candidate);
       return;
     }
-    if (event.type === "leave") { setConnected(false); setPhase("The other person ended the session"); }
+    if (event.type === "leave") { setConnected(false); clearReceivedFiles(); setPhase("The other person ended the session"); }
   };
 
   useEffect(() => { handleSignalRef.current = handleSignal; });
@@ -423,9 +460,11 @@ export default function CipherDropClient() {
   };
 
   const offerSelectedFile = async () => {
-    if (!selectedFile) return;
+    const target = sessionRef.current;
+    if (!selectedFile || !target) return;
     setBusy(true); setError("");
     try {
+      if (senderRole(target.direction) !== target.role) throw new Error("This device is locked to receiving files");
       if (selectedFile.size > MAX_FILE_SIZE) throw new Error("This version accepts files up to 100 MB to protect browser memory");
       if (isBlockedExecutable(selectedFile.name)) throw new Error("Executable and script files are blocked for safety");
       const hash = await sha256(await selectedFile.arrayBuffer());
@@ -443,7 +482,15 @@ export default function CipherDropClient() {
   };
 
   const acceptFile = async () => {
-    if (!incomingFile) return;
+    const target = sessionRef.current;
+    if (!incomingFile || !target) return;
+    if (senderRole(target.direction) === target.role) throw new Error("This device is locked to sending files");
+    const retainedBytes = receivedFilesRef.current.reduce((total, file) => total + file.size, 0);
+    const reservedBytes = receiveRef.current?.offer.size || 0;
+    if (!fitsReceivedTray(retainedBytes, reservedBytes, incomingFile.size)) {
+      setError("Remove received files before accepting this transfer. The temporary tray is limited to 100 MB.");
+      return;
+    }
     receiveRef.current = { offer: incomingFile, chunks: [], bytes: 0 };
     setTransfer({ name: incomingFile.name, direction: "receiving", progress: 0, detail: "Encrypted transfer starting" });
     await sendControl({ type: "file-accept", id: incomingFile.id });
@@ -459,38 +506,76 @@ export default function CipherDropClient() {
     const actualHash = await sha256(await blob.arrayBuffer());
     if (!constantTimeEqual(actualHash, receiving.offer.hash)) throw new Error("File integrity verification failed");
     const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = safeFilename(receiving.offer.name);
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    setTransfer({ name: receiving.offer.name, direction: "receiving", progress: 100, detail: "Verified and downloaded" });
+    const received: ReceivedFile = {
+      ...receiving.offer,
+      blob,
+      url,
+      previewKind: previewKindFor(receiving.offer.name, receiving.offer.type, receiving.offer.size),
+    };
+    replaceReceivedFiles([...receivedFilesRef.current, received]);
+    setTransfer({ name: receiving.offer.name, direction: "receiving", progress: 100, detail: "Verified and ready to view or download" });
     await sendControl({ type: "receipt", id, verified: true });
     receiveRef.current = null;
   };
 
   const handleControl = async (message: Record<string, unknown>) => {
     const type = String(message.type || "");
+    const target = sessionRef.current;
+    if (!target) throw new Error("The room is no longer active");
+    const localIsSender = senderRole(target.direction) === target.role;
     if (type === "file-offer") {
+      if (localIsSender) throw new Error("The transfer direction was violated by the receiving device");
+      if (incomingFile || receiveRef.current) throw new Error("Only one file transfer can be active at a time");
       const offer = message.offer;
       if (!validateFileOffer(offer) || isBlockedExecutable(offer.name)) throw new Error("Unsafe file offer rejected");
       setIncomingFile(offer); return;
     }
     if (type === "file-accept") {
+      if (!localIsSender) throw new Error("The transfer direction was violated by the sending device");
       const sending = currentSendRef.current;
       if (sending && sending.offer.id === message.id) void transmitFile(sending.file, sending.offer);
       return;
     }
-    if (type === "file-reject") { setTransfer(null); setFileOfferPending(false); currentSendRef.current = null; setPhase("The file was declined"); return; }
-    if (type === "file-complete") { await finishReceivedFile(String(message.id)); return; }
+    if (type === "file-reject") {
+      if (!localIsSender) throw new Error("Unexpected file rejection received by the receiver");
+      setTransfer(null); setFileOfferPending(false); currentSendRef.current = null; setPhase("The file was declined"); return;
+    }
+    if (type === "file-complete") {
+      if (localIsSender) throw new Error("Unexpected file completion received by the sender");
+      await finishReceivedFile(String(message.id)); return;
+    }
     if (type === "receipt" && message.verified) {
+      if (!localIsSender) throw new Error("Unexpected verification receipt received by the receiver");
       setTransfer((value) => value ? { ...value, progress: 100, detail: "Receiver verified the complete file" } : value);
       currentSendRef.current = null;
       setFileOfferPending(false);
+      setSelectedFile(null);
     }
   };
 
   useEffect(() => { handleControlRef.current = handleControl; });
+
+  const downloadReceivedFile = (file: ReceivedFile) => {
+    const link = document.createElement("a");
+    link.href = file.url;
+    link.download = safeFilename(file.name);
+    link.rel = "noopener";
+    link.click();
+  };
+
+  const viewReceivedFile = async (file: ReceivedFile) => {
+    if (!file.previewKind) return;
+    setError("");
+    setTextPreview(file.previewKind === "text" ? await file.blob.text() : "");
+    setPreviewingFile(file);
+  };
+
+  const removeReceivedFile = (id: string) => {
+    const file = receivedFilesRef.current.find((candidate) => candidate.id === id);
+    if (file) URL.revokeObjectURL(file.url);
+    if (previewingFile?.id === id) { setPreviewingFile(null); setTextPreview(""); }
+    replaceReceivedFiles(receivedFilesRef.current.filter((candidate) => candidate.id !== id));
+  };
 
   const endSession = async () => {
     const target = sessionRef.current;
@@ -500,21 +585,26 @@ export default function CipherDropClient() {
     }
     channelRef.current?.close(); peerRef.current?.close();
     channelRef.current = null; peerRef.current = null; cipherRef.current = null; sessionRef.current = null;
+    clearReceivedFiles();
     setSession(null); setConnected(false); setIncomingRequest(false); setSelectedFile(null); setIncomingFile(null); setTransfer(null); setFileOfferPending(false); setRelayAvailable(false); setSafetyCode("");
     negotiatedSecretRef.current = "";
-    setPhase("Session destroyed"); setInviteLink(""); window.history.replaceState({}, "", window.location.pathname);
+    setPhase("Session destroyed"); setInviteLink(""); setQrCodeUrl(""); window.history.replaceState({}, "", window.location.pathname);
   };
 
   useEffect(() => {
-    const close = () => { peerRef.current?.close(); channelRef.current?.close(); };
+    const close = () => { clearReceivedFiles(); peerRef.current?.close(); channelRef.current?.close(); };
     window.addEventListener("pagehide", close);
     return () => window.removeEventListener("pagehide", close);
-  }, []);
+  }, [clearReceivedFiles]);
 
   const copyInvite = async () => {
     await navigator.clipboard.writeText(inviteLink);
     setPhase("Private invitation copied");
   };
+
+  const localIsSender = Boolean(session && senderRole(session.direction) === session.role);
+  const receivedBytes = receivedFiles.reduce((total, file) => total + file.size, 0);
+  const incomingFits = !incomingFile || fitsReceivedTray(receivedBytes, 0, incomingFile.size);
 
   return (
     <main className="app-shell">
@@ -529,21 +619,29 @@ export default function CipherDropClient() {
       <div className="content">
         {!session ? (
           <section className="start-card">
-            <h1>{busy ? "Preparing your code…" : "Connect to someone"}</h1>
-            <p>Enter their code or paste an invitation link.</p>
+            <h1>{busy ? "Preparing a secure session…" : "Move files between two devices"}</h1>
+            <p>Choose what this device should do. The direction stays locked for the entire session.</p>
             {error && <div className="notice error" role="alert">{error}</div>}
+            <div className="direction-grid">
+              <button className="direction-card" type="button" onClick={() => createRoom("host-to-guest")} disabled={busy}>
+                <strong>Send files</strong><span>Choose files on this device</span>
+              </button>
+              <button className="direction-card" type="button" onClick={() => createRoom("guest-to-host")} disabled={busy}>
+                <strong>Receive files</strong><span>Keep files temporarily on this device</span>
+              </button>
+            </div>
+            <div className="divider"><span>or join another device</span></div>
             <div className="input-action">
               <label className="sr-only" htmlFor="invite">Connection code or invitation link</label>
               <input id="invite" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Code or invitation link" autoComplete="off" spellCheck={false} />
               <button className="button primary" type="button" onClick={joinRoom} disabled={busy || !inviteInput}>Connect</button>
             </div>
-            {!busy && <button className="text-button" type="button" onClick={createRoom}>Create my code instead</button>}
           </section>
         ) : (
           <section className="session">
             <div className="session-heading">
               <div>
-                <h1>{connected ? "Share a file" : session.role === "host" ? "Connect to someone" : "Connecting…"}</h1>
+                <h1>{connected ? (localIsSender ? "Send files" : "Receive files") : session.role === "host" ? "Pair another device" : "Connecting…"}</h1>
                 <div className="status"><span className={connected ? "dot online" : "dot"} />{phase}</div>
               </div>
               <button className="button subtle danger" onClick={endSession}>End session</button>
@@ -556,10 +654,20 @@ export default function CipherDropClient() {
                 <div className="code-section">
                   <span className="label">Your code</span>
                   <div className="connection-code">{session.code}</div>
-                  <p>Ask the other person to enter this code.</p>
+                  <p>The paired device will {session.direction === "host-to-guest" ? "receive files from this device" : "send files to this device"}.</p>
                 </div>
 
                 <div className="divider"><span>or</span></div>
+
+                {qrCodeUrl && (
+                  <div className="qr-section">
+                    <span className="label">Scan the private invitation</span>
+                    <Image src={qrCodeUrl} width={220} height={220} unoptimized alt="QR code for this private CipherDrop session" />
+                    <p>Scan with the other device. The invitation secret stays inside this QR code.</p>
+                  </div>
+                )}
+
+                <div className="divider"><span>or copy the link</span></div>
 
                 <div className="link-section">
                   <span className="label">Invitation link</span>
@@ -568,15 +676,6 @@ export default function CipherDropClient() {
                     <button className="button secondary" onClick={copyInvite}>Copy</button>
                   </div>
                 </div>
-
-                <details className="join-existing">
-                  <summary>Use someone else&apos;s code</summary>
-                  <div className="input-action compact">
-                    <label className="sr-only" htmlFor="other-code">Connection code or invitation link</label>
-                    <input id="other-code" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Code or invitation link" autoComplete="off" spellCheck={false} />
-                    <button className="button primary" type="button" onClick={joinRoom} disabled={busy || !inviteInput}>Connect</button>
-                  </div>
-                </details>
               </div>
             )}
 
@@ -599,22 +698,35 @@ export default function CipherDropClient() {
                 {connectionMode === "code" && <p className="safety-note">Compare the safety code with the other person before sending.</p>}
                 {!RELAY_ONLY && <p className="safety-note">Direct peer connections can reveal your IP address to the other person.</p>}
 
-                <label className="file-picker">
-                  <input type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
-                  {selectedFile ? (
-                    <><strong>{selectedFile.name}</strong><span>{formatBytes(selectedFile.size)}</span></>
-                  ) : (
-                    <><strong>Choose a file</strong><span>Up to 100 MB</span></>
-                  )}
-                </label>
-                <button className="button primary full" onClick={offerSelectedFile} disabled={!selectedFile || busy || fileOfferPending}>Send file</button>
+                <div className="direction-banner">
+                  <strong>{localIsSender ? "This device can send" : "This device can receive"}</strong>
+                  <span>The direction is locked until this session ends.</span>
+                </div>
 
-                {incomingFile && (
+                {localIsSender && (
+                  <>
+                    <label className="file-picker">
+                      <input type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
+                      {selectedFile ? (
+                        <><strong>{selectedFile.name}</strong><span>{formatBytes(selectedFile.size)}</span></>
+                      ) : (
+                        <><strong>Choose a file</strong><span>Up to 100 MB</span></>
+                      )}
+                    </label>
+                    <button className="button primary full" onClick={offerSelectedFile} disabled={!selectedFile || busy || fileOfferPending}>Send file</button>
+                  </>
+                )}
+
+                {!localIsSender && incomingFile && (
                   <div className="file-offer">
-                    <div><strong>{incomingFile.name}</strong><span>{formatBytes(incomingFile.size)} · Not malware-scanned</span></div>
+                    <div>
+                      <strong>{incomingFile.name}</strong>
+                      <span>{formatBytes(incomingFile.size)} · {incomingFile.type || "Unknown type"} · Not malware-scanned</span>
+                      {!incomingFits && <span className="capacity-warning">Remove files to free temporary memory before accepting.</span>}
+                    </div>
                     <div className="button-row">
                       <button className="button subtle" onClick={() => { void sendControl({ type: "file-reject", id: incomingFile.id }); setIncomingFile(null); }}>Decline</button>
-                      <button className="button primary" onClick={acceptFile}>Receive</button>
+                      <button className="button primary" onClick={acceptFile} disabled={!incomingFits}>Receive</button>
                     </div>
                   </div>
                 )}
@@ -626,11 +738,53 @@ export default function CipherDropClient() {
                     <small>{transfer.detail}</small>
                   </div>
                 )}
+
+                {!localIsSender && (
+                  <section className="received-tray" aria-labelledby="received-files-title">
+                    <div className="tray-heading">
+                      <div><h2 id="received-files-title">Received files</h2><p>{formatBytes(receivedBytes)} of {formatBytes(RECEIVED_TRAY_LIMIT)} held temporarily</p></div>
+                      {receivedFiles.length > 0 && <button className="button subtle danger" type="button" onClick={clearReceivedFiles}>Clear all</button>}
+                    </div>
+                    {receivedFiles.length === 0 ? (
+                      <p className="empty-tray">Verified files will appear here. Nothing downloads automatically.</p>
+                    ) : receivedFiles.map((file) => (
+                      <article className="received-file" key={file.id}>
+                        <div><strong>{file.name}</strong><span>{formatBytes(file.size)} · {file.type || "Unknown type"} · Verified</span></div>
+                        <div className="button-row">
+                          {file.previewKind && <button className="button subtle" type="button" onClick={() => void viewReceivedFile(file)}>View</button>}
+                          <button className="button secondary" type="button" onClick={() => downloadReceivedFile(file)}>Download</button>
+                          <button className="button subtle danger" type="button" onClick={() => removeReceivedFile(file.id)}>Remove</button>
+                        </div>
+                      </article>
+                    ))}
+                  </section>
+                )}
               </div>
             )}
           </section>
         )}
       </div>
+
+      {previewingFile && (
+        <div className="preview-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewingFile(null); }}>
+          <section className="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+            <div className="preview-heading">
+              <div><h2 id="preview-title">{previewingFile.name}</h2><p>{formatBytes(previewingFile.size)} · Temporary preview</p></div>
+              <button className="button subtle" type="button" onClick={() => { setPreviewingFile(null); setTextPreview(""); }}>Close</button>
+            </div>
+            <div className="preview-content">
+              {previewingFile.previewKind === "image" && <Image className="preview-image" src={previewingFile.url} alt={previewingFile.name} width={1200} height={900} unoptimized />}
+              {previewingFile.previewKind === "pdf" && <iframe src={previewingFile.url} title={`Preview of ${previewingFile.name}`} sandbox="" />}
+              {previewingFile.previewKind === "text" && <pre>{textPreview}</pre>}
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              {previewingFile.previewKind === "audio" && <audio src={previewingFile.url} controls aria-label={`Preview of ${previewingFile.name}`} />}
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              {previewingFile.previewKind === "video" && <video src={previewingFile.url} controls aria-label={`Preview of ${previewingFile.name}`} />}
+            </div>
+            <button className="button primary full" type="button" onClick={() => downloadReceivedFile(previewingFile)}>Download file</button>
+          </section>
+        </div>
+      )}
 
       <footer>End-to-end encrypted. Files are never stored by CipherDrop.</footer>
     </main>

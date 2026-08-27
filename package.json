@@ -9,11 +9,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test tests/cipher.test.mjs tests/file-protocol.test.mjs",
+    "test": "node --test tests/cipher.test.mjs tests/file-protocol.test.mjs tests/transfer-session.test.mjs",
     "lint": "eslint . --ignore-pattern .next"
   },
   "dependencies": {
     "next": "16.3.1",
+    "qrcode": "^1.5.4",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
@@ -21,6 +22,7 @@
     "@eslint/js": "9.39.4",
     "@next/eslint-plugin-next": "16.3.1",
     "@types/node": "22.19.19",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "eslint": "9.39.4",

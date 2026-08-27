@@ -45,14 +45,15 @@ function nonce(prefix: Uint8Array, sequence: bigint) {
   return value;
 }
 
-function additionalData(code: string, kind: "control" | "chunk", sequence: bigint) {
-  return textEncoder.encode(`cipherdrop-v1|${code}|${kind}|${sequence.toString()}`);
+function additionalData(code: string, direction: string, kind: "control" | "chunk", sequence: bigint) {
+  return textEncoder.encode(`cipherdrop-v2|${code}|${direction}|${kind}|${sequence.toString()}`);
 }
 
 export class SessionCipher {
   private sendSequence = BigInt(0);
   private receivedSequences = new Set<string>();
   private readonly code: string;
+  private readonly direction: string;
   private readonly sendKey: CryptoKey;
   private readonly receiveKey: CryptoKey;
   private readonly sendPrefix: Uint8Array;
@@ -61,6 +62,7 @@ export class SessionCipher {
 
   constructor(
     code: string,
+    direction: string,
     sendKey: CryptoKey,
     receiveKey: CryptoKey,
     sendPrefix: Uint8Array,
@@ -68,6 +70,7 @@ export class SessionCipher {
     safetyCode: string,
   ) {
     this.code = code;
+    this.direction = direction;
     this.sendKey = sendKey;
     this.receiveKey = receiveKey;
     this.sendPrefix = sendPrefix;
@@ -103,24 +106,24 @@ export class SessionCipher {
     const encrypted = await crypto.subtle.encrypt({
       name: "AES-GCM",
       iv: nonce(this.sendPrefix, sequence),
-      additionalData: additionalData(this.code, "control", sequence),
+      additionalData: additionalData(this.code, this.direction, "control", sequence),
       tagLength: 128,
     }, this.sendKey, textEncoder.encode(JSON.stringify(message)));
-    return `CD1:${sequence.toString()}:${bytesToBase64Url(new Uint8Array(encrypted))}`;
+    return `CD2:${sequence.toString()}:${bytesToBase64Url(new Uint8Array(encrypted))}`;
   }
 
   async decryptControl(packet: string) {
     const parts = packet.split(":");
     if (parts.length !== 3) throw new Error("Invalid encrypted packet");
     const [version, rawSequence, ciphertext] = parts;
-    if (version !== "CD1" || !/^\d{1,20}$/u.test(rawSequence) || !ciphertext) throw new Error("Invalid encrypted packet");
+    if (version !== "CD2" || !/^\d{1,20}$/u.test(rawSequence) || !ciphertext) throw new Error("Invalid encrypted packet");
     const sequence = BigInt(rawSequence);
     if (sequence > 0xffff_ffff_ffff_ffffn) throw new Error("Invalid encrypted packet sequence");
     this.ensureNotReplayed("control", sequence);
     const cleartext = await crypto.subtle.decrypt({
       name: "AES-GCM",
       iv: nonce(this.receivePrefix, sequence),
-      additionalData: additionalData(this.code, "control", sequence),
+      additionalData: additionalData(this.code, this.direction, "control", sequence),
       tagLength: 128,
     }, this.receiveKey, base64UrlToBytes(ciphertext));
     this.recordSequence("control", sequence);
@@ -132,11 +135,11 @@ export class SessionCipher {
     const encrypted = new Uint8Array(await crypto.subtle.encrypt({
       name: "AES-GCM",
       iv: nonce(this.sendPrefix, sequence),
-      additionalData: additionalData(this.code, "chunk", sequence),
+      additionalData: additionalData(this.code, this.direction, "chunk", sequence),
       tagLength: 128,
     }, this.sendKey, chunk));
     const packet = new Uint8Array(9 + encrypted.length);
-    packet[0] = 1;
+    packet[0] = 2;
     new DataView(packet.buffer).setBigUint64(1, sequence, false);
     packet.set(encrypted, 9);
     return packet.buffer;
@@ -144,13 +147,13 @@ export class SessionCipher {
 
   async decryptChunk(packet: ArrayBuffer) {
     const bytes = new Uint8Array(packet);
-    if (bytes[0] !== 1 || bytes.length < 26) throw new Error("Invalid chunk packet");
+    if (bytes[0] !== 2 || bytes.length < 26) throw new Error("Invalid chunk packet");
     const sequence = new DataView(packet).getBigUint64(1, false);
     this.ensureNotReplayed("chunk", sequence);
     const cleartext = await crypto.subtle.decrypt({
       name: "AES-GCM",
       iv: nonce(this.receivePrefix, sequence),
-      additionalData: additionalData(this.code, "chunk", sequence),
+      additionalData: additionalData(this.code, this.direction, "chunk", sequence),
       tagLength: 128,
     }, this.receiveKey, bytes.slice(9));
     this.recordSequence("chunk", sequence);
@@ -166,11 +169,12 @@ export async function deriveSessionCipher(input: {
   hostPublicKey: string;
   guestPublicKey: string;
   invitationSecret: string;
+  transferDirection: "host-to-guest" | "guest-to-host";
 }) {
   const otherKey = await crypto.subtle.importKey("raw", base64UrlToBytes(input.otherPublicKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
   const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: otherKey }, input.keyPair.privateKey, 256);
   const source = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveBits"]);
-  const context = textEncoder.encode(`cipherdrop-v1|${input.code}|${input.hostPublicKey}|${input.guestPublicKey}`);
+  const context = textEncoder.encode(`cipherdrop-v2|${input.code}|${input.transferDirection}|${input.hostPublicKey}|${input.guestPublicKey}`);
   const material = new Uint8Array(await crypto.subtle.deriveBits({
     name: "HKDF",
     hash: "SHA-256",
@@ -186,8 +190,8 @@ export async function deriveSessionCipher(input: {
   const safetyCode = safetyValue.toString().padStart(6, "0").replace(/(\d{3})(\d{3})/u, "$1 $2");
 
   return input.role === "host"
-    ? new SessionCipher(input.code, hostToGuest, guestToHost, hostPrefix, guestPrefix, safetyCode)
-    : new SessionCipher(input.code, guestToHost, hostToGuest, guestPrefix, hostPrefix, safetyCode);
+    ? new SessionCipher(input.code, input.transferDirection, hostToGuest, guestToHost, hostPrefix, guestPrefix, safetyCode)
+    : new SessionCipher(input.code, input.transferDirection, guestToHost, hostToGuest, guestPrefix, hostPrefix, safetyCode);
 }
 
 export async function sha256(value: ArrayBuffer) {

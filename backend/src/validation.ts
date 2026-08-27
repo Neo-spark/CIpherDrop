@@ -24,6 +24,10 @@ function isOptionalString(value: unknown, maxLength: number) {
     || (typeof value === "string" && value.length <= maxLength);
 }
 
+export function isTransferDirection(value: unknown): value is "host-to-guest" | "guest-to-host" {
+  return value === "host-to-guest" || value === "guest-to-host";
+}
+
 export function validateSignalPayload(type: string, payload: unknown): payload is Record<string, unknown> {
   if (!allowedSignals.has(type) || !isRecord(payload)) return false;
   if (JSON.stringify(payload).length > 60_000) return false;
@@ -35,13 +39,15 @@ export function validateSignalPayload(type: string, payload: unknown): payload i
   if (type === "guest-key") {
     return isBase64Url(payload.publicKey, 87)
       && isBase64Url(payload.mac, 43)
+      && isTransferDirection(payload.direction)
       && (payload.mode === "code" || payload.mode === "link");
   }
 
   if (type === "accept") {
     return isBase64Url(payload.publicKey, 87)
       && isBase64Url(payload.guestPublicKey, 87)
-      && isBase64Url(payload.mac, 43);
+      && isBase64Url(payload.mac, 43)
+      && isTransferDirection(payload.direction);
   }
 
   if (type === "offer" || type === "answer") {

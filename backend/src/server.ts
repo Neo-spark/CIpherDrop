@@ -5,7 +5,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import helmet from "helmet";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
-import { validateSignalPayload } from "./validation.js";
+import { isTransferDirection, validateSignalPayload } from "./validation.js";
 
 loadEnvironment({ path: ["../.env.local", ".env.local", ".env"] });
 
@@ -18,10 +18,12 @@ const frontendOrigins = new Set(
 );
 
 type Role = "host" | "guest";
+type TransferDirection = "host-to-guest" | "guest-to-host";
 type StoredSession = {
   hostTokenHash: string;
   guestTokenHash: string | null;
   status: "waiting" | "pending";
+  direction: TransferDirection;
   createdAt: number;
   expiresAt: number;
 };
@@ -213,6 +215,11 @@ app.get("/health", (_request, response) => {
 
 app.post("/api/sessions", async (request, response, next) => {
   try {
+    const direction = request.body?.direction;
+    if (!isTransferDirection(direction)) {
+      sendJson(response, { error: "Choose whether this device will send or receive" }, 400);
+      return;
+    }
     const rate = await createRateLimit.limit(fingerprint(request));
     if (!rate.success) {
       sendJson(response, { error: "Too many rooms created. Please wait a minute." }, 429);
@@ -226,12 +233,13 @@ app.post("/api/sessions", async (request, response, next) => {
         hostTokenHash: hash(token),
         guestTokenHash: null,
         status: "waiting",
+        direction,
         createdAt: now,
         expiresAt: now + SESSION_SECONDS * 1000,
       };
       const created = await redis.set(sessionKey(code), session, { nx: true, ex: SESSION_SECONDS });
       if (created) {
-        sendJson(response, { code, token, expiresAt: session.expiresAt }, 201);
+        sendJson(response, { code, token, direction, expiresAt: session.expiresAt }, 201);
         return;
       }
     }
@@ -271,7 +279,11 @@ app.post("/api/sessions/:code/join", async (request, response, next) => {
     }
     await pushSignal(code, "host", "join-request", {});
     const session = await redis.get<StoredSession>(sessionKey(code));
-    sendJson(response, { code, token, expiresAt: session?.expiresAt ?? Date.now() + SESSION_SECONDS * 1000 }, 201);
+    if (!session || !isTransferDirection(session.direction)) {
+      sendJson(response, { error: "Room direction is unavailable" }, 409);
+      return;
+    }
+    sendJson(response, { code, token, direction: session.direction, expiresAt: session.expiresAt }, 201);
   } catch (error) {
     next(error);
   }
