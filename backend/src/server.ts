@@ -34,62 +34,122 @@ type SignalEvent = {
   createdAt: number;
 };
 
-function createRedis() {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
-  if (!url || !token) throw new Error("KV_REST_API_URL and KV_REST_API_TOKEN are required");
-  return new Redis({ url, token, automaticDeserialization: true });
+const KV_URL = process.env.KV_REST_API_URL;
+const KV_TOKEN = process.env.KV_REST_API_TOKEN;
+type RateLimitResult = { success: boolean; reset: number };
+type Limiter = { limit(identifier: string): Promise<RateLimitResult> };
+
+class MemoryStore {
+  private readonly values = new Map<string, unknown>();
+  private readonly expirations = new Map<string, number>();
+
+  private purge(key: string) {
+    const expiresAt = this.expirations.get(key);
+    if (expiresAt && expiresAt <= Date.now()) {
+      this.values.delete(key);
+      this.expirations.delete(key);
+    }
+  }
+
+  async get<T>(key: string) {
+    this.purge(key);
+    return (this.values.get(key) as T | undefined) ?? null;
+  }
+
+  async set(key: string, value: unknown, options?: { nx?: boolean; ex?: number }) {
+    this.purge(key);
+    if (options?.nx && this.values.has(key)) return null;
+    this.values.set(key, value);
+    if (options?.ex) this.expirations.set(key, Date.now() + options.ex * 1000);
+    return "OK";
+  }
+
+  async incr(key: string) {
+    const value = Number(this.values.get(key) || 0) + 1;
+    this.values.set(key, value);
+    return value;
+  }
+
+  async lrange<T>(key: string, start: number, end: number) {
+    const values = (await this.get<T[]>(key)) || [];
+    return values.slice(start, end < 0 ? values.length : end + 1);
+  }
+
+  async rpush(key: string, value: unknown) {
+    const values = (await this.get<unknown[]>(key)) || [];
+    values.push(value);
+    this.values.set(key, values);
+  }
+
+  async ltrim(key: string, start: number, end: number) {
+    const values = (await this.get<unknown[]>(key)) || [];
+    this.values.set(key, values.slice(start, end < 0 ? values.length : end + 1));
+  }
+
+  async expire(key: string, seconds: number) {
+    this.expirations.set(key, Date.now() + seconds * 1000);
+  }
+
+  async del(...keys: string[]) {
+    for (const key of keys) {
+      this.values.delete(key);
+      this.expirations.delete(key);
+    }
+  }
+
+  pipeline() {
+    const operations: Array<() => Promise<unknown>> = [];
+    return {
+      rpush: (key: string, value: unknown) => { operations.push(() => this.rpush(key, value)); return this; },
+      ltrim: (key: string, start: number, end: number) => { operations.push(() => this.ltrim(key, start, end)); return this; },
+      expire: (key: string, seconds: number) => { operations.push(() => this.expire(key, seconds)); return this; },
+      exec: async () => { for (const operation of operations) await operation(); return []; },
+    };
+  }
+
+  async eval(_script: string, keys: string[], args: string[]) {
+    const session = await this.get<StoredSession>(keys[0]!);
+    if (!session || session.guestTokenHash !== null) return 0;
+    session.guestTokenHash = args[0]!;
+    session.status = "pending";
+    await this.set(keys[0]!, session);
+    return 1;
+  }
 }
 
-const redis = createRedis();
-const createRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(20, "1 m"),
-  prefix: "cipherdrop:rate:create",
-  analytics: false,
-});
-const joinRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(40, "1 m"),
-  prefix: "cipherdrop:rate:join",
-  analytics: false,
-});
-const signalReadTokenRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(150, "1 m"),
-  prefix: "cipherdrop:rate:signal-read-token",
-  analytics: false,
-});
-const signalReadIpRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(600, "1 m"),
-  prefix: "cipherdrop:rate:signal-read-ip",
-  analytics: false,
-});
-const signalWriteTokenRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(90, "1 m"),
-  prefix: "cipherdrop:rate:signal-write-token",
-  analytics: false,
-});
-const signalWriteIpRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(300, "1 m"),
-  prefix: "cipherdrop:rate:signal-write-ip",
-  analytics: false,
-});
-const iceTokenRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(12, "10 m"),
-  prefix: "cipherdrop:rate:ice-token",
-  analytics: false,
-});
-const iceIpRateLimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(60, "10 m"),
-  prefix: "cipherdrop:rate:ice-ip",
-  analytics: false,
-});
+function memoryLimiter(windowMs: number, limit: number): Limiter {
+  const attempts = new Map<string, { count: number; reset: number }>();
+  return {
+    async limit(identifier) {
+      const now = Date.now();
+      const current = attempts.get(identifier);
+      if (!current || current.reset <= now) {
+        attempts.set(identifier, { count: 1, reset: now + windowMs });
+        return { success: true, reset: now + windowMs };
+      }
+      current.count += 1;
+      return { success: current.count <= limit, reset: current.reset };
+    },
+  };
+}
+
+const usingUpstash = Boolean(KV_URL && KV_TOKEN);
+const redis = usingUpstash ? new Redis({ url: KV_URL!, token: KV_TOKEN!, automaticDeserialization: true }) : new MemoryStore();
+if (!usingUpstash) console.warn("KV credentials are not configured; using an in-memory store for local development.");
+
+function createLimiter(limit: number, duration: "1 m" | "10 m", prefix: string): Limiter {
+  if (!usingUpstash) return memoryLimiter(duration === "1 m" ? 60_000 : 600_000, limit);
+  return new Ratelimit({ redis: redis as Redis, limiter: Ratelimit.slidingWindow(limit, duration), prefix, analytics: false });
+}
+
+const createRateLimit = createLimiter(20, "1 m", "cipherdrop:rate:create");
+const joinRateLimit = createLimiter(40, "1 m", "cipherdrop:rate:join");
+const signalReadTokenRateLimit = createLimiter(150, "1 m", "cipherdrop:rate:signal-read-token");
+const signalReadIpRateLimit = createLimiter(600, "1 m", "cipherdrop:rate:signal-read-ip");
+const signalWriteTokenRateLimit = createLimiter(90, "1 m", "cipherdrop:rate:signal-write-token");
+const signalWriteIpRateLimit = createLimiter(300, "1 m", "cipherdrop:rate:signal-write-ip");
+const iceTokenRateLimit = createLimiter(12, "10 m", "cipherdrop:rate:ice-token");
+const iceIpRateLimit = createLimiter(60, "10 m", "cipherdrop:rate:ice-ip");
 
 function sessionKey(code: string) {
   return `cipherdrop:session:${code}`;
@@ -135,8 +195,8 @@ function sendJson(response: Response, data: unknown, status = 200) {
 async function enforceAuthenticatedLimit(
   request: Request,
   response: Response,
-  tokenLimiter: Ratelimit,
-  ipLimiter: Ratelimit,
+  tokenLimiter: Limiter,
+  ipLimiter: Limiter,
   message: string,
 ) {
   const code = response.locals.code as string;

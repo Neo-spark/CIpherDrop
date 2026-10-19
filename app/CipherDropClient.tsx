@@ -32,6 +32,7 @@ import {
   type Role,
   type TransferDirection,
 } from "@/lib/transfer-session";
+import { ArrowRight, FileDown, FileUp, Link2, ShieldCheck } from "lucide-react";
 
 type Session = {
   code: string;
@@ -48,7 +49,7 @@ type Transfer = { name: string; direction: "sending" | "receiving"; progress: nu
 type ReceivedFile = FileOffer & { blob: Blob; url: string; previewKind: PreviewKind | null };
 
 const defaultIceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/u, "");
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/$/u, "");
 const RELAY_ONLY = process.env.NEXT_PUBLIC_RELAY_ONLY === "true";
 
 async function api<T>(path: string, options: RequestInit = {}, session?: Session): Promise<T> {
@@ -112,6 +113,7 @@ export default function CipherDropClient() {
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
   const [previewingFile, setPreviewingFile] = useState<ReceivedFile | null>(null);
   const [textPreview, setTextPreview] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const sessionRef = useRef<Session | null>(null);
   const cipherRef = useRef<SessionCipher | null>(null);
@@ -610,30 +612,31 @@ export default function CipherDropClient() {
     <main className="app-shell">
       <header className="topbar">
         <button className="wordmark" onClick={() => { if (!session) router.push("/"); }} aria-label="CipherDrop home">
-          <span className="wordmark-icon" aria-hidden="true">C</span>
-          CipherDrop
+          <span className="wordmark-icon" aria-hidden="true"><ShieldCheck size={17} /></span>
+          Cipher<span>Drop</span>
         </button>
-        <span className="privacy-status"><span className="dot online" /> No account required</span>
+        <span className="privacy-status"><span className="dot online" /> Private by default</span>
       </header>
 
       <div className="content">
         {!session ? (
           <section className="start-card">
+            <div className="app-kicker"><ShieldCheck size={14} /> Secure workspace</div>
             <h1>{busy ? "Preparing a secure session…" : "Move files between two devices"}</h1>
-            <p>Choose what this device should do. The direction stays locked for the entire session.</p>
+            <p>Choose a direction to create an encrypted bridge. Your files never touch our servers.</p>
             {error && <div className="notice error" role="alert">{error}</div>}
             <div className="direction-grid">
               <button className="direction-card" type="button" onClick={() => createRoom("host-to-guest")} disabled={busy}>
-                <strong>Send files</strong><span>Choose files on this device</span>
+                <span className="direction-icon"><FileUp size={20} /></span><strong>Send files <ArrowRight size={16} /></strong><span>Choose files on this device</span>
               </button>
               <button className="direction-card" type="button" onClick={() => createRoom("guest-to-host")} disabled={busy}>
-                <strong>Receive files</strong><span>Keep files temporarily on this device</span>
+                <span className="direction-icon receive"><FileDown size={20} /></span><strong>Receive files <ArrowRight size={16} /></strong><span>Keep files temporarily on this device</span>
               </button>
             </div>
             <div className="divider"><span>or join another device</span></div>
             <div className="input-action">
               <label className="sr-only" htmlFor="invite">Connection code or invitation link</label>
-              <input id="invite" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Code or invitation link" autoComplete="off" spellCheck={false} />
+              <div className="invite-input"><Link2 size={16} /><input id="invite" value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="Paste a code or invitation link" autoComplete="off" spellCheck={false} /></div>
               <button className="button primary" type="button" onClick={joinRoom} disabled={busy || !inviteInput}>Connect</button>
             </div>
           </section>
@@ -705,15 +708,60 @@ export default function CipherDropClient() {
 
                 {localIsSender && (
                   <>
-                    <label className="file-picker">
-                      <input type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
-                      {selectedFile ? (
-                        <><strong>{selectedFile.name}</strong><span>{formatBytes(selectedFile.size)}</span></>
-                      ) : (
-                        <><strong>Choose a file</strong><span>Up to 100 MB</span></>
-                      )}
+                    <label className="file-picker" htmlFor="transfer-file">
+                      <input
+                        ref={fileInputRef}
+                        id="transfer-file"
+                        type="file"
+                        onChange={(event) => {
+                          setSelectedFile(event.target.files?.[0] || null);
+                          setError("");
+                        }}
+                      />
+                      <span className="file-picker-icon"><FileUp size={22} /></span>
+                      <strong>{selectedFile ? "Choose a different file" : "Choose a file to send"}</strong>
+                      <span>{selectedFile ? "Your selected file is ready below" : "Up to 100 MB · encrypted in your browser"}</span>
                     </label>
-                    <button className="button primary full" onClick={offerSelectedFile} disabled={!selectedFile || busy || fileOfferPending}>Send file</button>
+                    {selectedFile && (
+                      <div className="selected-file-panel" aria-live="polite">
+                        <div className="selected-file-info">
+                          <span className="selected-file-icon"><FileUp size={18} /></span>
+                          <span className="selected-file-copy">
+                            <strong>{selectedFile.name}</strong>
+                            <span>{formatBytes(selectedFile.size)} · Ready to send</span>
+                          </span>
+                        </div>
+                        <div className="selected-file-actions">
+                          <button
+                            className="button subtle"
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={busy || fileOfferPending}
+                          >
+                            Change
+                          </button>
+                          <button
+                            className="button subtle danger"
+                            type="button"
+                            onClick={() => {
+                              setSelectedFile(null);
+                              if (fileInputRef.current) fileInputRef.current.value = "";
+                            }}
+                            disabled={busy || fileOfferPending}
+                          >
+                            Remove
+                          </button>
+                          <button
+                            className="button primary"
+                            type="button"
+                            onClick={offerSelectedFile}
+                            disabled={busy || fileOfferPending}
+                          >
+                            {fileOfferPending ? "Waiting…" : "Send file"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
 

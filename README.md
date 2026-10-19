@@ -96,7 +96,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser. Add the Upstash values described below to `backend/.env.local`, then open the application in two browser windows and connect them using the generated code or invitation link.
+Open [http://localhost:3000](http://localhost:3000) in your browser. For local development, the backend automatically uses an in-memory session store when Upstash values are not configured; this is intended for development only and all rooms disappear when the backend restarts. Add the Upstash values described below for persistent multi-instance signaling, then open the application in two browser windows and connect them using the generated code or invitation link.
 
 ### Validation
 

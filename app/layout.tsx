@@ -1,16 +1,12 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
 import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.SITE_URL ??
-      (process.env.VERCEL_PROJECT_PRODUCTION_URL
-        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
-        : "http://localhost:3000"),
+    process.env.SITE_URL ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "http://localhost:3000"),
   ),
-  title: "CipherDrop — Encrypted temporary file sharing",
-  description: "Send end-to-end encrypted files directly between two browsers. No accounts, no file storage, no permanent connections.",
+  title: "CipherDrop — Secure peer-to-peer file sharing",
+  description: "End-to-end encrypted temporary file sharing directly between two browsers. No accounts, no permanent storage, no third-party access.",
   openGraph: {
     title: "CipherDrop",
     description: "Send files. Leave no trace.",
@@ -24,11 +20,12 @@ export const metadata: Metadata = {
   },
 };
 
-export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  await headers();
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" className="dark">
+      <body className="bg-brand-bg text-brand-text font-sans antialiased">
+        {children}
+      </body>
     </html>
-  );
+  )
 }
