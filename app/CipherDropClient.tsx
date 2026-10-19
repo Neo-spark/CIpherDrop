@@ -195,6 +195,11 @@ export default function CipherDropClient() {
     channel.onclose = () => {
       setConnected(false);
       setPhase("The private connection ended");
+      receiveRef.current = null;
+      currentSendRef.current = null;
+      setIncomingFile(null);
+      setFileOfferPending(false);
+      setTransfer(null);
       clearReceivedFiles();
     };
     channel.onerror = () => setError("The encrypted data channel reported an error");
@@ -226,7 +231,7 @@ export default function CipherDropClient() {
         setTransfer({
           name: receiving.offer.name,
           direction: "receiving",
-          progress: Math.min(100, (receiving.bytes / receiving.offer.size) * 100),
+          progress: receiving.offer.size === 0 ? 0 : Math.min(100, (receiving.bytes / receiving.offer.size) * 100),
           detail: `${formatBytes(receiving.bytes)} of ${formatBytes(receiving.offer.size)}`,
         });
       } catch (caught) {
@@ -516,8 +521,8 @@ export default function CipherDropClient() {
     };
     replaceReceivedFiles([...receivedFilesRef.current, received]);
     setTransfer({ name: receiving.offer.name, direction: "receiving", progress: 100, detail: "Verified and ready to view or download" });
-    await sendControl({ type: "receipt", id, verified: true });
     receiveRef.current = null;
+    await sendControl({ type: "receipt", id, verified: true });
   };
 
   const handleControl = async (message: Record<string, unknown>) => {
