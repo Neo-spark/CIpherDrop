@@ -49,7 +49,7 @@ type Transfer = { name: string; direction: "sending" | "receiving"; progress: nu
 type ReceivedFile = FileOffer & { blob: Blob; url: string; previewKind: PreviewKind | null };
 
 const defaultIceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/$/u, "");
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/u, "");
 const RELAY_ONLY = process.env.NEXT_PUBLIC_RELAY_ONLY === "true";
 
 async function api<T>(path: string, options: RequestInit = {}, session?: Session): Promise<T> {
